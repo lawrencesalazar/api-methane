@@ -10,6 +10,7 @@ from io import BytesIO
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import BackgroundTasks
 
 import firebase_admin
 from firebase_admin import credentials, db
@@ -227,8 +228,9 @@ def firebase_health():
         raise HTTPException(500, "Firebase not connected")
 
 @app.post("/api/sensor/insert")
-def api_insert(data: Dict[str, Any]):
-    insert_sensor(data)
+async def api_insert(data: Dict[str, Any], background_tasks: BackgroundTasks):
+    # Use background task so request returns immediately
+    background_tasks.add_task(insert_sensor, data)
     return {"status": "ok"}
 
 @app.get("/api/sensor/latest/{sensor_id}")
