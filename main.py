@@ -50,17 +50,90 @@ DEFAULT_THRESHOLDS = {
 # FIREBASE INIT
 # =========================================================
 def initialize_firebase():
+    """Initialize Firebase Realtime Database with better error handling"""
     global firebase_db
     try:
+        # Check if Firebase is already initialized
+        if firebase_db is not None:
+            logger.info("Firebase already initialized")
+            return True
+
+        # Method 1: Check for service account JSON string in environment
+        firebase_config_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
+        if firebase_config_json:
+            try:
+                service_account_info = json.loads(firebase_config_json)
+                cred = credentials.Certificate(service_account_info)
+                logger.info("Using Firebase config from FIREBASE_SERVICE_ACCOUNT environment variable")
+            except json.JSONDecodeError as e:
+                logger.error(f"Invalid JSON in FIREBASE_SERVICE_ACCOUNT: {e}")
+                return False
+        else:
+            # Method 2: Individual environment variables
+            private_key = os.getenv("FIREBASE_PRIVATE_KEY", "")
+            if private_key:
+                # Handle newline characters in private key
+                private_key = private_key.replace('\\n', '\n')
+            
+            service_account_info = {
+                "type": "service_account",
+                "project_id": os.getenv("FIREBASE_PROJECT_ID"),
+                "private_key_id": os.getenv("FIREBASE_PRIVATE_KEY_ID"),
+                "private_key": private_key,
+                "client_email": os.getenv("FIREBASE_CLIENT_EMAIL"),
+                "client_id": os.getenv("FIREBASE_CLIENT_ID"),
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+                "client_x509_cert_url": os.getenv("FIREBASE_CLIENT_CERT_URL")
+            }
+            
+            # Validate required fields
+            required_fields = ["project_id", "private_key", "client_email"]
+            for field in required_fields:
+                if not service_account_info.get(field):
+                    logger.error(f"Missing required Firebase config field: {field}")
+                    return False
+            
+            cred = credentials.Certificate(service_account_info)
+            logger.info("Using Firebase config from individual environment variables")
+
+        database_url = os.getenv(
+            "FIREBASE_DB_URL",
+            "https://gasmonitoring-ec511-default-rtdb.asia-southeast1.firebasedatabase.app"
+        )
+
+        # Initialize Firebase app
         if not firebase_admin._apps:
-            cred = credentials.Certificate("firebase_key.json")  # Replace with your Firebase key
-            firebase_admin.initialize_app(cred, {
-                "databaseURL": "https://YOUR_PROJECT.firebaseio.com/"
+            firebase_app = firebase_admin.initialize_app(cred, {
+                "databaseURL": database_url
             })
-        firebase_db = db
+            logger.info(f"Firebase app initialized: {firebase_app.name}")
+        else:
+            logger.info("Using existing Firebase app")
+        
+        # Get database reference
+        firebase_db = db.reference()
+        logger.info("Firebase Realtime Database initialized successfully")
+        logger.info(f"Database URL: {database_url}")
+        
         return True
+        
     except Exception as e:
-        logger.error(f"Firebase init error: {e}")
+        logger.error(f"Firebase initialization failed: {str(e)}")
+        logger.error(f"Error type: {type(e).__name__}")
+        
+        # Log environment variables (without sensitive values)
+        env_info = {
+            "FIREBASE_PROJECT_ID": bool(os.getenv("FIREBASE_PROJECT_ID")),
+            "FIREBASE_CLIENT_EMAIL": bool(os.getenv("FIREBASE_CLIENT_EMAIL")),
+            "FIREBASE_PRIVATE_KEY": bool(os.getenv("FIREBASE_PRIVATE_KEY")),
+            "FIREBASE_PRIVATE_KEY_ID": bool(os.getenv("FIREBASE_PRIVATE_KEY_ID")),
+            "FIREBASE_SERVICE_ACCOUNT": bool(os.getenv("FIREBASE_SERVICE_ACCOUNT")),
+        }
+        logger.info(f"Firebase environment variables: {env_info}")
+        
+        firebase_db = None
         return False
 
 # =========================================================
