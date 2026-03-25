@@ -304,6 +304,120 @@ def sensor_summary(sensor_id: str):
         "temperature": data.get("temperature", 0),
         "humidity": data.get("humidity", 0)
     }
+
+# =========================================================
+# PDF REPORT GENERATOR (CHAPTER 4)
+# =========================================================
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
+
+@app.get("/api/report/{sensor_id}")
+def generate_report(sensor_id: str):
+    try:
+        filename = f"{sensor_id}_report.pdf"
+        filepath = f"/tmp/{filename}"
+
+        doc = SimpleDocTemplate(filepath)
+        styles = getSampleStyleSheet()
+
+        elements = []
+
+        # TITLE
+        elements.append(Paragraph("Methane Monitoring System Report", styles["Title"]))
+        elements.append(Spacer(1, 10))
+
+        # FETCH DATA
+        latest = db.reference(f"sensorReadings/latest/{sensor_id}").get()
+        forecast_data = forecast(sensor_id)
+
+        if not latest:
+            raise HTTPException(404, "No data available")
+
+        # SUMMARY
+        elements.append(Paragraph(f"Sensor ID: {sensor_id}", styles["Normal"]))
+        elements.append(Paragraph(f"Timestamp: {latest['timestamp']}", styles["Normal"]))
+        elements.append(Spacer(1, 10))
+
+        elements.append(Paragraph(f"Methane: {latest['methane']} ppm", styles["Normal"]))
+        elements.append(Paragraph(f"CO2: {latest['co2']} ppm", styles["Normal"]))
+        elements.append(Paragraph(f"Ammonia: {latest['ammonia']} ppm", styles["Normal"]))
+        elements.append(Paragraph(f"Temperature: {latest.get('temperature',0)} °C", styles["Normal"]))
+        elements.append(Paragraph(f"Humidity: {latest.get('humidity',0)} %", styles["Normal"]))
+
+        elements.append(Spacer(1, 15))
+
+        # RISK
+        risk = evaluate_risk(latest)
+        if risk:
+            elements.append(Paragraph(f"Risk Level: {risk['level']}", styles["Normal"]))
+            elements.append(Paragraph(f"Risk Score: {risk['score']}", styles["Normal"]))
+        else:
+            elements.append(Paragraph("Risk Level: LOW", styles["Normal"]))
+
+        elements.append(Spacer(1, 15))
+
+        # FORECAST
+        elements.append(Paragraph("Methane Forecast (Next Readings):", styles["Heading2"]))
+        for f in forecast_data["forecast"]:
+            elements.append(Paragraph(f"{f} ppm", styles["Normal"]))
+
+        # BUILD PDF
+        doc.build(elements)
+
+        return {
+            "status": "success",
+            "download_url": f"/api/report/download/{sensor_id}"
+        }
+
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+# DOWNLOAD ENDPOINT
+from fastapi.responses import FileResponse
+
+@app.get("/api/report/download/{sensor_id}")
+def download_report(sensor_id: str):
+    filepath = f"/tmp/{sensor_id}_report.pdf"
+    return FileResponse(filepath, media_type='application/pdf', filename=f"{sensor_id}_report.pdf")
+
+import joblib
+
+model = None
+
+def load_model():
+    global model
+    try:
+        model = joblib.load("model.pkl")
+        logger.info("✅ AI model loaded")
+    except:
+        logger.warning("⚠️ No model found")
+
+load_model()
+
+@app.post("/api/predict")
+def predict(data: Dict[str, Any]):
+    try:
+        if not model:
+            raise HTTPException(500, "Model not loaded")
+
+        features = [[
+            float(data["co2"]),
+            float(data["ammonia"]),
+            float(data["temperature"]),
+            float(data["humidity"])
+        ]]
+
+        prediction = model.predict(features)[0]
+
+        return {
+            "predicted_methane": round(prediction, 2),
+            "input": data
+        }
+
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    
 # =========================================================
 # WEBSOCKET
 # =========================================================
