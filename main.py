@@ -71,10 +71,18 @@ def initialize_firebase():
 # =========================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    initialize_firebase()
-    yield
-    logger.info("Shutdown complete")
+    if initialize_firebase():
+        logger.info("🔥 Firebase initialized")
+    else:
+        logger.error("❌ Firebase init failed")
 
+    # Check connection immediately
+    if is_firebase_connected():
+        logger.info("✅ Firebase connection verified")
+    else:
+        logger.error("❌ Firebase connection test failed")
+
+    yield
 # =========================================================
 # FASTAPI APP
 # =========================================================
@@ -159,10 +167,34 @@ def evaluate_risk(data):
         return {"level": "MEDIUM", "score": round(score,2)}
     return None
 
+def is_firebase_connected() -> bool:
+    try:
+        if not firebase_admin._apps:
+            logger.error("❌ Firebase app not initialized")
+            return False
+
+        # Try a simple read operation
+        test_ref = db.reference("health_check")
+        test_ref.get()
+
+        return True
+
+    except Exception as e:
+        logger.error(f"❌ Firebase connection failed: {e}")
+        return False
+@app.get("/api/health/firebase")
+def firebase_health():
+    if is_firebase_connected():
+        return {"status": "connected"}
+    else:
+        raise HTTPException(500, "Firebase not connected")
 # =========================================================
 # INSERT SENSOR DATA
 # =========================================================
 def insert_sensor(data: Dict[str, Any]):
+    if not is_firebase_connected():
+        raise Exception("Firebase is not connected")
+
     now = datetime.now()
     key = now.strftime('%Y%m%d_%H%M%S')
     data["timestamp"] = now.strftime('%Y-%m-%d %H:%M:%S')
@@ -176,13 +208,22 @@ def insert_sensor(data: Dict[str, Any]):
     alert = evaluate_risk(data)
     if alert:
         root.child(f"sensorReadings/alerts/{sid}/{key}").set(alert)
+    if not firebase_admin._apps:
+        raise Exception("Firebase not initialized")
 
-    # 🔥 REAL-TIME PUSH
-    try:
-        asyncio.create_task(manager.broadcast(data))
-    except:
-        pass
+    now = datetime.now()
+    key = now.strftime('%Y%m%d_%H%M%S')
+    data["timestamp"] = now.strftime('%Y-%m-%d %H:%M:%S')
 
+    root = db.reference()
+    sid = data["sensor_id"]
+
+    root.child(f"sensorReadings/latest/{sid}").set(data)
+    root.child(f"sensorReadings/history/{sid}/{key}").set(data)
+
+    alert = evaluate_risk(data)
+    if alert:
+        root.child(f"sensorReadings/alerts/{sid}/{key}").set(alert)
 # =========================================================
 # ROUTES
 # =========================================================
