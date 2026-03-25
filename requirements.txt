@@ -3,14 +3,12 @@ fastapi==0.104.1
 uvicorn[standard]==0.24.0
 firebase-admin==6.2.0
 gunicorn
-xgboost==2.0.0
 scikit-learn
 pandas
-numpy
+numpy 
 shap==0.43.0
 seaborn==0.13.0
-psutil
-scipy==1.11.4
+psutil 
 resend
 slowapi==0.1.5
 limits==1.6
