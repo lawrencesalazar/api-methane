@@ -116,9 +116,18 @@ class ConnectionManager:
         self.active_connections.remove(websocket)
 
     async def broadcast(self, data: dict):
+        payload = {
+            "timestamp": data.get("timestamp"),
+            "methane": float(data.get("methane", 0)),
+            "co2": float(data.get("co2", 0)),
+            "ammonia": float(data.get("ammonia", 0)),
+            "temperature": float(data.get("temperature", 0)),
+            "humidity": float(data.get("humidity", 0)),
+        }
+
         for connection in self.active_connections:
             try:
-                await connection.send_json(data)
+                await connection.send_json(payload)
             except:
                 pass
 
@@ -225,6 +234,99 @@ def insert_sensor(data: Dict[str, Any]):
     alert = evaluate_risk(data)
     if alert:
         root.child(f"sensorReadings/alerts/{sid}/{key}").set(alert)
+
+
+@app.get("/api/fuzzy/heatmap/{sensor_id}")
+def fuzzy_heatmap(sensor_id: str):
+    try:
+        data = db.reference(f"sensorReadings/latest/{sensor_id}").get()
+        if not data:
+            raise HTTPException(404, "No data")
+
+        t = get_thresholds(sensor_id)
+
+        def fuzz(val, low, high):
+            if val <= low: return 0
+            if val >= high: return 1
+            return (val - low) / (high - low)
+
+        methane = float(data["methane"])
+        co2 = float(data["co2"])
+        ammonia = float(data["ammonia"])
+
+        heatmap = [
+            ["Methane", fuzz(methane, t["methane_low"], t["methane_high"])],
+            ["CO2", fuzz(co2, t["co2_low"], t["co2_high"])],
+            ["Ammonia", fuzz(ammonia, t["ammonia_low"], t["ammonia_high"])]
+        ]
+
+        return {
+            "sensor_id": sensor_id,
+            "heatmap": heatmap
+        }
+
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    
+@app.get("/api/visualization/chart/{sensor_id}")
+def chart_data(sensor_id: str):
+    try:
+        data = db.reference(f"sensorReadings/history/{sensor_id}").get()
+
+        if not data:
+            raise HTTPException(404, "No data")
+
+        labels = []
+        methane = []
+        co2 = []
+        ammonia = []
+
+        for k in sorted(data.keys()):
+            record = data[k]
+
+            ts = record.get("timestamp")
+            m = record.get("methane")
+            c = record.get("co2")
+            a = record.get("ammonia")
+
+            if ts is None:
+                continue
+
+            try:
+                m = float(m)
+                c = float(c)
+                a = float(a)
+            except:
+                continue
+
+            labels.append(ts)
+            methane.append(m)
+            co2.append(c)
+            ammonia.append(a)
+
+        return {
+            "sensor_id": sensor_id,
+            "labels": labels,
+            "datasets": [
+                {
+                    "label": "Methane",
+                    "data": methane
+                },
+                {
+                    "label": "CO2",
+                    "data": co2
+                },
+                {
+                    "label": "Ammonia",
+                    "data": ammonia
+                }
+            ]
+        }
+
+    except Exception as e:
+        logger.error(f"Chart API error: {e}")
+        raise HTTPException(500, str(e))
+     
 # =========================================================
 # ROUTES
 # =========================================================
@@ -274,7 +376,7 @@ async def websocket_endpoint(websocket: WebSocket):
 # =========================================================
 # METHANE VISUALIZATION
 # =========================================================
- @app.get("/api/visualization/methane/{sensor_id}")
+@app.get("/api/visualization/methane/{sensor_id}")
 def methane(sensor_id: str):
     try:
         data = db.reference(f"sensorReadings/history/{sensor_id}").get()
