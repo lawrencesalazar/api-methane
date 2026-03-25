@@ -467,7 +467,22 @@ def fuzzy_heatmap(sensor_id: str):
             "error": str(e)
         }    
 
-
+# =========================================================
+# LIST SENSORS
+# =========================================================
+@app.get("/api/sensors")
+def get_sensors():
+    """
+    Returns a list of available sensor IDs from Firebase latest readings.
+    """
+    try:
+        data = db.reference("sensorReadings/latest").get()
+        if not data:
+            return []
+        return list(data.keys())
+    except Exception as e:
+        logger.error(f"Failed to fetch sensors: {e}")
+        return []
 # =========================================================
 # WEBSOCKET
 # =========================================================
