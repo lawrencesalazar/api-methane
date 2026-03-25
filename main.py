@@ -99,6 +99,16 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+@app.websocket("/ws/test")
+async def websocket_test(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            data = await websocket.receive_text()
+            await websocket.send_text(f"Echo: {data}")
+    except WebSocketDisconnect:
+        print("Client disconnected")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
