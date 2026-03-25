@@ -191,16 +191,17 @@ def evaluate_risk(data):
 # =========================================================
 # INSERT SENSOR DATA
 # =========================================================
-def insert_sensor(data: Dict[str, Any]):
+async def insert_sensor(data: Dict[str, Any]):
     if not is_firebase_connected():
         raise Exception("Firebase is not connected")
 
     now = datetime.now()
     key = now.strftime('%Y%m%d_%H%M%S')
     data["timestamp"] = now.strftime('%Y-%m-%d %H:%M:%S')
-    sid = data["sensor_id"]
 
     root = db.reference()
+    sid = data["sensor_id"]
+
     root.child(f"sensorReadings/latest/{sid}").set(data)
     root.child(f"sensorReadings/history/{sid}/{key}").set(data)
 
@@ -208,9 +209,9 @@ def insert_sensor(data: Dict[str, Any]):
     if alert:
         root.child(f"sensorReadings/alerts/{sid}/{key}").set(alert)
 
-    # 🔥 Broadcast to WebSocket clients asynchronously
-    asyncio.create_task(manager.broadcast(data))
-
+    # 🔥 Broadcast to WebSocket clients
+    if manager.active_connections:
+        await manager.broadcast(data)
 # =========================================================
 # ROUTES
 # =========================================================
