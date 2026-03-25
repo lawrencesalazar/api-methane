@@ -417,7 +417,55 @@ def predict(data: Dict[str, Any]):
 
     except Exception as e:
         raise HTTPException(500, str(e))
-    
+# =========================================================
+# 🔥 FUZZY HEATMAP API (ADD THIS)
+# =========================================================
+@app.get("/api/fuzzy/heatmap/{sensor_id}")
+def fuzzy_heatmap(sensor_id: str):
+    try:
+        data = db.reference(f"sensorReadings/latest/{sensor_id}").get()
+
+        if not data:
+            return {
+                "sensor_id": sensor_id,
+                "heatmap": []
+            }
+
+        t = get_adaptive_thresholds(sensor_id)
+
+        def safe_float(v):
+            try:
+                return float(v)
+            except:
+                return 0
+
+        def fuzz(v, low, high):
+            if v <= low: return 0
+            if v >= high: return 1
+            return (v - low) / (high - low)
+
+        methane = safe_float(data.get("methane", 0))
+        co2 = safe_float(data.get("co2", 0))
+        ammonia = safe_float(data.get("ammonia", 0))
+
+        heatmap = [
+            ["Methane", round(fuzz(methane, t["methane_low"], t["methane_high"]), 2)],
+            ["CO2", round(fuzz(co2, 800, t["co2_high"]), 2)],
+            ["Ammonia", round(fuzz(ammonia, 10, t["ammonia_high"]), 2)]
+        ]
+
+        return {
+            "sensor_id": sensor_id,
+            "heatmap": heatmap
+        }
+
+    except Exception as e:
+        logger.error(f"Heatmap error: {e}")
+        return {
+            "sensor_id": sensor_id,
+            "heatmap": [],
+            "error": str(e)
+        }    
 # =========================================================
 # WEBSOCKET
 # =========================================================
