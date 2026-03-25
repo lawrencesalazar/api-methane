@@ -483,6 +483,53 @@ def get_sensors():
     except Exception as e:
         logger.error(f"Failed to fetch sensors: {e}")
         return []
+
+
+
+from fastapi.responses import JSONResponse
+import numpy as np
+import shap
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+
+@app.get("/api/model/explain/{sensor_id}")
+def model_explain(sensor_id: str):
+    """
+    Returns SHAP values for latest readings of a sensor.
+    """
+    try:
+        if model is None:
+            raise HTTPException(500, "Model not loaded")
+        latest = db.reference(f"sensorReadings/latest/{sensor_id}").get()
+        if not latest:
+            raise HTTPException(404, "No data")
+        
+        features = np.array([[latest["co2"], latest["ammonia"], latest.get("temperature",0), latest.get("humidity",0)]])
+        explainer = shap.Explainer(model)
+        shap_values = explainer(features)
+        return JSONResponse({"shap_values": shap_values.values.tolist(), "base_value": shap_values.base_values.tolist()})
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+@app.get("/api/model/metrics/{sensor_id}")
+def model_metrics(sensor_id: str):
+    """
+    Evaluate model accuracy (RMSE, MAE) on latest 10 readings.
+    """
+    try:
+        if model is None:
+            raise HTTPException(500, "Model not loaded")
+        history = db.reference(f"sensorReadings/history/{sensor_id}").get()
+        if not history:
+            raise HTTPException(404, "No data")
+        keys = sorted(history.keys())[-10:]
+        y_true = [float(history[k]["methane"]) for k in keys]
+        X = np.array([[history[k]["co2"], history[k]["ammonia"], history[k].get("temperature",0), history[k].get("humidity",0)] for k in keys])
+        y_pred = model.predict(X)
+        rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+        mae = mean_absolute_error(y_true, y_pred)
+        return {"RMSE": round(rmse,2), "MAE": round(mae,2), "y_true": y_true, "y_pred": y_pred.tolist()}
+    except Exception as e:
+        raise HTTPException(500, str(e))
 # =========================================================
 # WEBSOCKET
 # =========================================================
