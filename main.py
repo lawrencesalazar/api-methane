@@ -250,7 +250,60 @@ def forecast(sensor_id):
         future.append(round(last,2))
 
     return {"forecast":future}
+# =========================================================
+# THRESHOLD APIs
+# =========================================================
+@app.post("/api/thresholds/update")
+def update_thresholds(data: Dict[str, Any]):
+    sid = data.get("sensor_id")
+    if not sid:
+        raise HTTPException(400, "sensor_id required")
 
+    db.reference(f"sensorReadings/thresholds/{sid}").set(data)
+    return {"status": "updated", "data": data}
+
+
+@app.get("/api/thresholds/{sensor_id}")
+def get_thresholds(sensor_id: str):
+    data = db.reference(f"sensorReadings/thresholds/{sensor_id}").get()
+    return data if data else DEFAULT_THRESHOLDS
+# =========================================================
+# GAS STATUS INTERPRETATION
+# =========================================================
+def gas_status(value, low, high):
+    if value < low:
+        return "LOW"
+    elif value > high:
+        return "HIGH"
+    return "NORMAL"
+@app.get("/api/sensor/summary/{sensor_id}")
+def sensor_summary(sensor_id: str):
+    data = db.reference(f"sensorReadings/latest/{sensor_id}").get()
+
+    if not data:
+        raise HTTPException(404, "No data")
+
+    t = get_adaptive_thresholds(sensor_id)
+
+    return {
+        "sensor_id": sensor_id,
+        "timestamp": data["timestamp"],
+
+        "methane": {
+            "value": data["methane"],
+            "status": gas_status(data["methane"], t["methane_low"], t["methane_high"])
+        },
+        "co2": {
+            "value": data["co2"],
+            "status": gas_status(data["co2"], 800, t["co2_high"])
+        },
+        "ammonia": {
+            "value": data["ammonia"],
+            "status": gas_status(data["ammonia"], 10, t["ammonia_high"])
+        },
+        "temperature": data.get("temperature", 0),
+        "humidity": data.get("humidity", 0)
+    }
 # =========================================================
 # WEBSOCKET
 # =========================================================
