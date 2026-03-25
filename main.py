@@ -15,7 +15,8 @@ import firebase_admin
 from firebase_admin import credentials, db
 
 import matplotlib.pyplot as plt
-
+import matplotlib
+matplotlib.use('Agg')  # 🔥 REQUIRED for Render / headless server
 # =========================================================
 # CONFIG
 # =========================================================
@@ -273,27 +274,67 @@ async def websocket_endpoint(websocket: WebSocket):
 # =========================================================
 # METHANE VISUALIZATION
 # =========================================================
-@app.get("/api/visualization/methane/{sensor_id}")
+ @app.get("/api/visualization/methane/{sensor_id}")
 def methane(sensor_id: str):
-    data = db.reference(f"sensorReadings/history/{sensor_id}").get()
-    if not data:
-        raise HTTPException(404, "No data")
+    try:
+        data = db.reference(f"sensorReadings/history/{sensor_id}").get()
 
-    x, y = [], []
-    for k in sorted(data.keys()):
-        x.append(data[k]["timestamp"])
-        y.append(data[k]["methane"])
+        if not data:
+            raise HTTPException(404, "No data found")
 
-    plt.figure()
-    plt.plot(x, y)
-    plt.xticks(rotation=45)
+        x = []
+        y = []
 
-    buf = BytesIO()
-    plt.savefig(buf, format="png")
-    buf.seek(0)
+        for k in sorted(data.keys()):
+            record = data[k]
 
-    return {"image": base64.b64encode(buf.read()).decode()}
+            # ✅ Safe extraction
+            timestamp = record.get("timestamp")
+            methane = record.get("methane")
 
+            if timestamp is None or methane is None:
+                continue
+
+            try:
+                methane = float(methane)
+            except:
+                continue
+
+            x.append(timestamp)
+            y.append(methane)
+
+        if len(x) == 0:
+            raise HTTPException(400, "No valid data to plot")
+
+        # ✅ Plot
+        plt.figure(figsize=(10, 5))
+        plt.plot(x, y, marker='o')
+
+        plt.xticks(rotation=45)
+        plt.title(f"Methane Levels - {sensor_id}")
+        plt.xlabel("Time")
+        plt.ylabel("Methane (ppm)")
+        plt.tight_layout()
+
+        # ✅ Convert to image
+        buf = BytesIO()
+        plt.savefig(buf, format="png")
+        buf.seek(0)
+
+        image_base64 = base64.b64encode(buf.read()).decode()
+
+        plt.close()  # 🔥 IMPORTANT (prevents memory leak)
+
+        return {
+            "sensor_id": sensor_id,
+            "points": len(x),
+            "image": image_base64
+        }
+
+    except Exception as e:
+        logger.error(f"Visualization error: {e}")
+        raise HTTPException(500, str(e))
+    
 # =========================================================
 # RUN
 # =========================================================
