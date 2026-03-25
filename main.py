@@ -10,7 +10,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import firebase_admin
 from firebase_admin import credentials, db
+from datetime import datetime
+from zoneinfo import ZoneInfo  # Python 3.9+ 
 
+PH_TZ = ZoneInfo("Asia/Manila") 
 # ----------------------
 # Logging
 # ----------------------
@@ -136,7 +139,7 @@ async def insert_sensor(data: Dict[str, Any]):
     if not is_firebase_connected():
         raise Exception("Firebase not connected")
     
-    now = datetime.now()
+    now = datetime.now(PH_TZ) 
     key = now.strftime('%Y%m%d_%H%M%S')
     data["timestamp"] = now.strftime('%Y-%m-%d %H:%M:%S')
     sid = data["sensor_id"]
