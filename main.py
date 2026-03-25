@@ -16,7 +16,8 @@ from firebase_admin import credentials, db
 
 import matplotlib.pyplot as plt
 import matplotlib
-matplotlib.use('Agg')  # 🔥 REQUIRED for Render / headless server
+matplotlib.use('Agg')  # Required for headless servers
+
 # =========================================================
 # CONFIG
 # =========================================================
@@ -41,7 +42,6 @@ def initialize_firebase():
             cred = credentials.Certificate(service_account_info)
         else:
             private_key = os.getenv("FIREBASE_PRIVATE_KEY", "").replace('\\n', '\n')
-
             service_account_info = {
                 "type": "service_account",
                 "project_id": os.getenv("FIREBASE_PROJECT_ID"),
@@ -51,7 +51,6 @@ def initialize_firebase():
                 "client_id": os.getenv("FIREBASE_CLIENT_ID"),
                 "token_uri": "https://oauth2.googleapis.com/token",
             }
-
             cred = credentials.Certificate(service_account_info)
 
         if not firebase_admin._apps:
@@ -67,8 +66,20 @@ def initialize_firebase():
         logger.error(f"Firebase init error: {e}")
         return False
 
+def is_firebase_connected() -> bool:
+    try:
+        if not firebase_admin._apps:
+            logger.error("❌ Firebase app not initialized")
+            return False
+        test_ref = db.reference("health_check")
+        test_ref.get()
+        return True
+    except Exception as e:
+        logger.error(f"❌ Firebase connection failed: {e}")
+        return False
+
 # =========================================================
-# LIFESPAN
+# FASTAPI LIFESPAN
 # =========================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -77,13 +88,8 @@ async def lifespan(app: FastAPI):
     else:
         logger.error("❌ Firebase init failed")
 
-    # Check connection immediately
-    if is_firebase_connected():
-        logger.info("✅ Firebase connection verified")
-    else:
-        logger.error("❌ Firebase connection test failed")
-
     yield
+
 # =========================================================
 # FASTAPI APP
 # =========================================================
@@ -106,14 +112,15 @@ app.add_middleware(
 # =========================================================
 class ConnectionManager:
     def __init__(self):
-        self.active_connections = []
+        self.active_connections: list[WebSocket] = []
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
 
     async def broadcast(self, data: dict):
         payload = {
@@ -124,12 +131,11 @@ class ConnectionManager:
             "temperature": float(data.get("temperature", 0)),
             "humidity": float(data.get("humidity", 0)),
         }
-
         for connection in self.active_connections:
             try:
                 await connection.send_json(payload)
             except:
-                pass
+                self.disconnect(connection)
 
 manager = ConnectionManager()
 
@@ -164,40 +170,14 @@ def fuzzify(value, low, high):
 
 def evaluate_risk(data):
     t = get_thresholds(data["sensor_id"])
-
     m = fuzzify(data["methane"], t["methane_low"], t["methane_high"])
     c = fuzzify(data["co2"], t["co2_low"], t["co2_high"])
     a = fuzzify(data["ammonia"], t["ammonia_low"], t["ammonia_high"])
-
     score = (m*0.3 + c*0.3 + a*0.4) * 100
-
-    if score >= 75:
-        return {"level": "HIGH", "score": round(score,2)}
-    elif score >= 40:
-        return {"level": "MEDIUM", "score": round(score,2)}
+    if score >= 75: return {"level": "HIGH", "score": round(score,2)}
+    elif score >= 40: return {"level": "MEDIUM", "score": round(score,2)}
     return None
 
-def is_firebase_connected() -> bool:
-    try:
-        if not firebase_admin._apps:
-            logger.error("❌ Firebase app not initialized")
-            return False
-
-        # Try a simple read operation
-        test_ref = db.reference("health_check")
-        test_ref.get()
-
-        return True
-
-    except Exception as e:
-        logger.error(f"❌ Firebase connection failed: {e}")
-        return False
-@app.get("/api/health/firebase")
-def firebase_health():
-    if is_firebase_connected():
-        return {"status": "connected"}
-    else:
-        raise HTTPException(500, "Firebase not connected")
 # =========================================================
 # INSERT SENSOR DATA
 # =========================================================
@@ -208,26 +188,9 @@ def insert_sensor(data: Dict[str, Any]):
     now = datetime.now()
     key = now.strftime('%Y%m%d_%H%M%S')
     data["timestamp"] = now.strftime('%Y-%m-%d %H:%M:%S')
-
-    root = db.reference()
     sid = data["sensor_id"]
 
-    root.child(f"sensorReadings/latest/{sid}").set(data)
-    root.child(f"sensorReadings/history/{sid}/{key}").set(data)
-
-    alert = evaluate_risk(data)
-    if alert:
-        root.child(f"sensorReadings/alerts/{sid}/{key}").set(alert)
-    if not firebase_admin._apps:
-        raise Exception("Firebase not initialized")
-
-    now = datetime.now()
-    key = now.strftime('%Y%m%d_%H%M%S')
-    data["timestamp"] = now.strftime('%Y-%m-%d %H:%M:%S')
-
     root = db.reference()
-    sid = data["sensor_id"]
-
     root.child(f"sensorReadings/latest/{sid}").set(data)
     root.child(f"sensorReadings/history/{sid}/{key}").set(data)
 
@@ -235,104 +198,22 @@ def insert_sensor(data: Dict[str, Any]):
     if alert:
         root.child(f"sensorReadings/alerts/{sid}/{key}").set(alert)
 
+    # 🔥 Broadcast to WebSocket clients asynchronously
+    asyncio.create_task(manager.broadcast(data))
 
-@app.get("/api/fuzzy/heatmap/{sensor_id}")
-def fuzzy_heatmap(sensor_id: str):
-    try:
-        data = db.reference(f"sensorReadings/latest/{sensor_id}").get()
-        if not data:
-            raise HTTPException(404, "No data")
-
-        t = get_thresholds(sensor_id)
-
-        def fuzz(val, low, high):
-            if val <= low: return 0
-            if val >= high: return 1
-            return (val - low) / (high - low)
-
-        methane = float(data["methane"])
-        co2 = float(data["co2"])
-        ammonia = float(data["ammonia"])
-
-        heatmap = [
-            ["Methane", fuzz(methane, t["methane_low"], t["methane_high"])],
-            ["CO2", fuzz(co2, t["co2_low"], t["co2_high"])],
-            ["Ammonia", fuzz(ammonia, t["ammonia_low"], t["ammonia_high"])]
-        ]
-
-        return {
-            "sensor_id": sensor_id,
-            "heatmap": heatmap
-        }
-
-    except Exception as e:
-        raise HTTPException(500, str(e))
-    
-@app.get("/api/visualization/chart/{sensor_id}")
-def chart_data(sensor_id: str):
-    try:
-        data = db.reference(f"sensorReadings/history/{sensor_id}").get()
-
-        if not data:
-            raise HTTPException(404, "No data")
-
-        labels = []
-        methane = []
-        co2 = []
-        ammonia = []
-
-        for k in sorted(data.keys()):
-            record = data[k]
-
-            ts = record.get("timestamp")
-            m = record.get("methane")
-            c = record.get("co2")
-            a = record.get("ammonia")
-
-            if ts is None:
-                continue
-
-            try:
-                m = float(m)
-                c = float(c)
-                a = float(a)
-            except:
-                continue
-
-            labels.append(ts)
-            methane.append(m)
-            co2.append(c)
-            ammonia.append(a)
-
-        return {
-            "sensor_id": sensor_id,
-            "labels": labels,
-            "datasets": [
-                {
-                    "label": "Methane",
-                    "data": methane
-                },
-                {
-                    "label": "CO2",
-                    "data": co2
-                },
-                {
-                    "label": "Ammonia",
-                    "data": ammonia
-                }
-            ]
-        }
-
-    except Exception as e:
-        logger.error(f"Chart API error: {e}")
-        raise HTTPException(500, str(e))
-     
 # =========================================================
 # ROUTES
 # =========================================================
 @app.get("/")
 def root():
     return {"status": "API running"}
+
+@app.get("/api/health/firebase")
+def firebase_health():
+    if is_firebase_connected():
+        return {"status": "connected"}
+    else:
+        raise HTTPException(500, "Firebase not connected")
 
 @app.post("/api/sensor/insert")
 def api_insert(data: Dict[str, Any]):
@@ -362,81 +243,55 @@ def update_thresholds(data: Dict[str, Any]):
     return {"status": "updated"}
 
 # =========================================================
-# WEBSOCKET ENDPOINT
+# CHART & HEATMAP APIs
+# =========================================================
+@app.get("/api/visualization/chart/{sensor_id}")
+def chart_data(sensor_id: str):
+    data = db.reference(f"sensorReadings/history/{sensor_id}").get()
+    if not data:
+        raise HTTPException(404, "No data")
+    labels, methane, co2, ammonia = [], [], [], []
+    for k in sorted(data.keys()):
+        rec = data[k]
+        labels.append(rec.get("timestamp"))
+        methane.append(float(rec.get("methane",0)))
+        co2.append(float(rec.get("co2",0)))
+        ammonia.append(float(rec.get("ammonia",0)))
+    return {
+        "sensor_id": sensor_id,
+        "labels": labels,
+        "datasets": [
+            {"label":"Methane","data":methane},
+            {"label":"CO2","data":co2},
+            {"label":"Ammonia","data":ammonia}
+        ]
+    }
+
+@app.get("/api/fuzzy/heatmap/{sensor_id}")
+def fuzzy_heatmap(sensor_id: str):
+    data = db.reference(f"sensorReadings/latest/{sensor_id}").get()
+    if not data:
+        raise HTTPException(404, "No data")
+    t = get_thresholds(sensor_id)
+    heatmap = [
+        ["Methane", fuzzify(data["methane"], t["methane_low"], t["methane_high"])],
+        ["CO2", fuzzify(data["co2"], t["co2_low"], t["co2_high"])],
+        ["Ammonia", fuzzify(data["ammonia"], t["ammonia_low"], t["ammonia_high"])]
+    ]
+    return {"sensor_id": sensor_id, "heatmap": heatmap}
+
+# =========================================================
+# WEBSOCKET
 # =========================================================
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
         while True:
-            await websocket.receive_text()
+            await websocket.receive_text()  # keep-alive
     except WebSocketDisconnect:
         manager.disconnect(websocket)
 
-# =========================================================
-# METHANE VISUALIZATION
-# =========================================================
-@app.get("/api/visualization/methane/{sensor_id}")
-def methane(sensor_id: str):
-    try:
-        data = db.reference(f"sensorReadings/history/{sensor_id}").get()
-
-        if not data:
-            raise HTTPException(404, "No data found")
-
-        x = []
-        y = []
-
-        for k in sorted(data.keys()):
-            record = data[k]
-
-            # ✅ Safe extraction
-            timestamp = record.get("timestamp")
-            methane = record.get("methane")
-
-            if timestamp is None or methane is None:
-                continue
-
-            try:
-                methane = float(methane)
-            except:
-                continue
-
-            x.append(timestamp)
-            y.append(methane)
-
-        if len(x) == 0:
-            raise HTTPException(400, "No valid data to plot")
-
-        # ✅ Plot
-        plt.figure(figsize=(10, 5))
-        plt.plot(x, y, marker='o')
-
-        plt.xticks(rotation=45)
-        plt.title(f"Methane Levels - {sensor_id}")
-        plt.xlabel("Time")
-        plt.ylabel("Methane (ppm)")
-        plt.tight_layout()
-
-        # ✅ Convert to image
-        buf = BytesIO()
-        plt.savefig(buf, format="png")
-        buf.seek(0)
-
-        image_base64 = base64.b64encode(buf.read()).decode()
-
-        plt.close()  # 🔥 IMPORTANT (prevents memory leak)
-
-        return {
-            "sensor_id": sensor_id,
-            "points": len(x),
-            "image": image_base64
-        }
-
-    except Exception as e:
-        logger.error(f"Visualization error: {e}")
-        raise HTTPException(500, str(e))
-    
 # =========================================================
 # RUN
 # =========================================================
