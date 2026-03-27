@@ -380,43 +380,7 @@ from fastapi.responses import FileResponse
 def download_report(sensor_id: str):
     filepath = f"/tmp/{sensor_id}_report.pdf"
     return FileResponse(filepath, media_type='application/pdf', filename=f"{sensor_id}_report.pdf")
-
-import joblib
-
-model = None
-
-def load_model():
-    global model
-    try:
-        model = joblib.load("model.pkl")
-        logger.info("✅ AI model loaded")
-    except:
-        logger.warning("⚠️ No model found")
-
-load_model()
-
-@app.post("/api/predict")
-def predict(data: Dict[str, Any]):
-    try:
-        if not model:
-            raise HTTPException(500, "Model not loaded")
-
-        features = [[
-            float(data["co2"]),
-            float(data["ammonia"]),
-            float(data["temperature"]),
-            float(data["humidity"])
-        ]]
-
-        prediction = model.predict(features)[0]
-
-        return {
-            "predicted_methane": round(prediction, 2),
-            "input": data
-        }
-
-    except Exception as e:
-        raise HTTPException(500, str(e))
+  
 # =========================================================
 # 🔥 FUZZY HEATMAP API (ADD THIS)
 # =========================================================
@@ -485,35 +449,85 @@ def get_sensors():
         return []
 
 
-
-from fastapi.responses import JSONResponse
-import numpy as np
+# =========================
+# AI MODEL LOAD
+# =========================
+import joblib
 import shap
+import numpy as np
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 
+model = None
+scaler = None
+
+def load_ai_model():
+    global model, scaler
+    try:
+        model = joblib.load("model.pkl")
+        scaler = joblib.load("scaler.pkl")
+        logger.info("✅ AI model & scaler loaded")
+    except Exception as e:
+        logger.warning(f"⚠️ AI model load failed: {e}")
+
+load_ai_model()
+
+# =========================================================
+# PREDICTION API
+# =========================================================
+@app.post("/api/predict")
+def predict(data: Dict[str, Any]):
+    """
+    Predict methane using AI model for provided sensor data.
+    """
+    try:
+        if model is None:
+            raise HTTPException(500, "Model not loaded")
+        features = [[
+            float(data.get("co2", 0)),
+            float(data.get("ammonia", 0)),
+            float(data.get("temperature", 0)),
+            float(data.get("humidity", 0))
+        ]]
+        if scaler:
+            features = scaler.transform(features)
+        prediction = model.predict(features)[0]
+        return {"predicted_methane": round(prediction, 2), "input": data}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+# =========================================================
+# SHAP EXPLAINER API
+# =========================================================
 @app.get("/api/model/explain/{sensor_id}")
 def model_explain(sensor_id: str):
     """
-    Returns SHAP values for latest readings of a sensor.
+    Returns SHAP values for latest sensor reading.
     """
     try:
         if model is None:
             raise HTTPException(500, "Model not loaded")
         latest = db.reference(f"sensorReadings/latest/{sensor_id}").get()
         if not latest:
-            raise HTTPException(404, "No data")
-        
+            raise HTTPException(404, "No data found")
+
         features = np.array([[latest["co2"], latest["ammonia"], latest.get("temperature",0), latest.get("humidity",0)]])
         explainer = shap.Explainer(model)
         shap_values = explainer(features)
-        return JSONResponse({"shap_values": shap_values.values.tolist(), "base_value": shap_values.base_values.tolist()})
+        return {
+            "shap_values": shap_values.values.tolist(),
+            "base_value": shap_values.base_values.tolist(),
+            "features": ["co2", "ammonia", "temperature", "humidity"]
+        }
     except Exception as e:
         raise HTTPException(500, str(e))
 
+# =========================================================
+# MODEL METRICS API
+# =========================================================
 @app.get("/api/model/metrics/{sensor_id}")
 def model_metrics(sensor_id: str):
     """
-    Evaluate model accuracy (RMSE, MAE) on latest 10 readings.
+    Compute RMSE & MAE for last 10 readings of a sensor.
     """
     try:
         if model is None:
@@ -524,12 +538,51 @@ def model_metrics(sensor_id: str):
         keys = sorted(history.keys())[-10:]
         y_true = [float(history[k]["methane"]) for k in keys]
         X = np.array([[history[k]["co2"], history[k]["ammonia"], history[k].get("temperature",0), history[k].get("humidity",0)] for k in keys])
+        if scaler:
+            X = scaler.transform(X)
         y_pred = model.predict(X)
         rmse = np.sqrt(mean_squared_error(y_true, y_pred))
         mae = mean_absolute_error(y_true, y_pred)
         return {"RMSE": round(rmse,2), "MAE": round(mae,2), "y_true": y_true, "y_pred": y_pred.tolist()}
     except Exception as e:
         raise HTTPException(500, str(e))
+
+# =========================================================
+# UPDATE INSERT_SENSOR WITH AI PREDICTION
+# =========================================================
+async def insert_sensor(data):
+    now = datetime.now(PH_TZ)
+    key = now.strftime('%Y%m%d_%H%M%S')
+    data["timestamp"] = now.strftime('%Y-%m-%d %H:%M:%S')
+    sid = data["sensor_id"]
+
+    root = db.reference()
+    root.child(f"sensorReadings/latest/{sid}").set(data)
+    root.child(f"sensorReadings/history/{sid}/{key}").set(data)
+
+    # Evaluate fuzzy risk
+    alert = evaluate_risk(data)
+    if alert:
+        root.child(f"sensorReadings/alerts/{sid}/{key}").set(alert)
+
+    # Predictive trend
+    trend = predict_trend(sid)
+    if trend:
+        root.child(f"sensorReadings/alerts/{sid}/{key}").set(trend)
+
+    # AI Prediction
+    try:
+        prediction = predict(data)["predicted_methane"]
+        root.child(f"sensorReadings/predictions/{sid}/{key}").set({
+            "predicted_methane": prediction,
+            "timestamp": data["timestamp"]
+        })
+        data["ai_prediction"] = prediction
+    except:
+        data["ai_prediction"] = None
+
+    # Broadcast updated data
+    await manager.broadcast(data)
 # =========================================================
 # WEBSOCKET
 # =========================================================
