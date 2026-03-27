@@ -433,7 +433,43 @@ def sensor_alerts(sensor_id: str):
 def download_report(sensor_id: str):
     filepath = f"/tmp/{sensor_id}_report.pdf"
     return FileResponse(filepath, media_type='application/pdf', filename=f"{sensor_id}_report.pdf")
+# =========================================================
+# MODEL METRICS (RMSE / MAE)
+# =========================================================
+@app.get("/api/model/metrics/{sensor_id}")
+def model_metrics(sensor_id: str):
+    try:
+        history = db.reference(f"sensorReadings/history/{sensor_id}").get()
+        if not history:
+            raise HTTPException(404, "No history data for this sensor")
 
+        # Take last 20 readings for metrics
+        keys = sorted(history.keys())[-20:]
+        y_true = [float(history[k]["methane"]) for k in keys]
+        X = np.array([
+            [
+                float(history[k].get("co2", 0)),
+                float(history[k].get("ammonia", 0)),
+                float(history[k].get("temperature", 0)),
+                float(history[k].get("humidity", 0))
+            ] for k in keys
+        ])
+
+        if scaler:
+            X = scaler.transform(X)
+
+        y_pred = model.predict(X)
+        rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+        mae = mean_absolute_error(y_true, y_pred)
+
+        return {
+            "RMSE": round(rmse, 2),
+            "MAE": round(mae, 2),
+            "y_true": y_true,
+            "y_pred": y_pred.tolist()
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Metrics computation failed: {e}")
 # =========================================================
 # WEBSOCKET
 # =========================================================
