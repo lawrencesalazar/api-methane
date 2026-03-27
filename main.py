@@ -378,7 +378,57 @@ def generate_report(sensor_id: str):
         return {"status":"success", "download_url":f"/api/report/download/{sensor_id}"}
     except Exception as e:
         return {"status":"error","message":str(e)}
+# =========================================================
+# VISUALIZATION CHART
+# =========================================================
+@app.get("/api/visualization/chart/{sensor_id}")
+def visualization_chart(sensor_id: str):
+    try:
+        history = db.reference(f"sensorReadings/history/{sensor_id}").get()
+        if not history:
+            return {"timestamps": [], "methane": [], "co2": [], "ammonia": []}
+        keys = sorted(history.keys())
+        timestamps = [history[k]["timestamp"] for k in keys]
+        methane = [float(history[k].get("methane", 0)) for k in keys]
+        co2 = [float(history[k].get("co2", 0)) for k in keys]
+        ammonia = [float(history[k].get("ammonia", 0)) for k in keys]
+        return {"timestamps": timestamps, "methane": methane, "co2": co2, "ammonia": ammonia}
+    except Exception as e:
+        raise HTTPException(500, f"Visualization chart error: {e}")
 
+
+# =========================================================
+# THRESHOLDS ENDPOINT
+# =========================================================
+@app.get("/api/thresholds/")
+def get_all_thresholds():
+    try:
+        sensors = db.reference("sensorReadings/latest").get()
+        result = {}
+        if not sensors:
+            return DEFAULT_THRESHOLDS
+        for sid in sensors:
+            result[sid] = get_adaptive_thresholds(sid)
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"Thresholds fetch error: {e}")
+
+
+# =========================================================
+# SENSOR ALERTS
+# =========================================================
+@app.get("/api/sensor/alerts/{sensor_id}")
+def sensor_alerts(sensor_id: str):
+    try:
+        alerts = db.reference(f"sensorReadings/alerts/{sensor_id}").get()
+        if not alerts:
+            return []
+        # sort by timestamp
+        sorted_alerts = [alerts[k] for k in sorted(alerts.keys())]
+        return sorted_alerts
+    except Exception as e:
+        raise HTTPException(500, f"Alerts fetch error: {e}")
+    
 @app.get("/api/report/download/{sensor_id}")
 def download_report(sensor_id: str):
     filepath = f"/tmp/{sensor_id}_report.pdf"
