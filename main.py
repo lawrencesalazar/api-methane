@@ -155,6 +155,39 @@ def evaluate_risk(data):
     elif score >= 40:
         return {"level":"MEDIUM","score":round(score,2)}
     return {"level":"LOW","score":round(score,2)}
+# =========================================================
+# FUZZY LOGIC ENDPOINT
+# =========================================================
+@app.get("/api/fuzzy/{sensor_id}")
+def api_fuzzy(sensor_id: str):
+    """
+    Returns the fuzzy logic evaluation for the given sensor.
+    Includes human-readable description for dashboard display.
+    """
+    # Get latest sensor data
+    data = db.reference(f"sensorReadings/latest/{sensor_id}").get()
+    if not data:
+        return {"sensor_id": sensor_id, "error": "No data available"}
+
+    # Compute fuzzy risk
+    risk = evaluate_risk({"sensor_id": sensor_id, **data})
+
+    # Prepare human-readable descriptions
+    descriptions = {
+        "methane": f"Methane level is {data.get('methane',0)} ppm, considered {risk['level']} risk",
+        "co2": f"CO2 level is {data.get('co2',0)} ppm, considered {risk['level']} risk",
+        "ammonia": f"Ammonia level is {data.get('ammonia',0)} ppm, considered {risk['level']} risk",
+        "overall": f"Overall environmental risk level: {risk['level']} with a score of {risk['score']}"
+    }
+
+    return {
+        "sensor_id": sensor_id,
+        "methane": {"value": data.get("methane",0), "risk": risk["level"]},
+        "co2": {"value": data.get("co2",0), "risk": risk["level"]},
+        "ammonia": {"value": data.get("ammonia",0), "risk": risk["level"]},
+        "score": risk["score"],
+        "descriptions": descriptions
+    }
 
 # =========================================================
 # PREDICTIVE ALERT
