@@ -1,39 +1,16 @@
-# Core numerical & data processing
-numpy==1.26.4
-pandas==2.1.2
-scikit-learn==1.3.2
-joblib==1.3.2
+numpy>=2.1.0
+scikit-learn>=1.5.0
+joblib>=1.3.2
 
-# Machine learning explainability
-shap==0.43.0
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+gunicorn>=21.2.0
 
-# Plotting / Visualization
-matplotlib==3.9.2
-seaborn==0.13.0
-chart.js==4.5.1        # For React front-end Chart.js integration (npm)
-chartjs-plugin-annotation==2.2.1 # Chart.js annotation (npm)
+firebase-admin>=6.2.0
+reportlab>=4.0.7
 
-# Web Framework
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-gunicorn==21.2.0
+psutil>=5.9.5
+requests>=2.31.0
 
-# Firebase Integration
-firebase-admin==6.2.0
-
-# System monitoring / Performance
-psutil==5.9.5
-
-# HTTP requests
-requests==2.31.0
-
-# Rate limiting for APIs
-slowapi==0.1.5
-limits==1.6
-
-# PDF Reporting
-reportlab==4.0.7
-
-# Optional: ensure build tools
-setuptools>=68.0.0
-wheel>=1.0.0
+slowapi>=0.1.5
+limits>=1.6
