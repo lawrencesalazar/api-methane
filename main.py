@@ -288,19 +288,49 @@ def get_sensors():
 
 @app.get("/api/sensor/summary/{sensor_id}")
 def sensor_summary(sensor_id: str):
+    # Get latest data
     data = db.reference(f"sensorReadings/latest/{sensor_id}").get()
     if not data:
-        return {"sensor_id": sensor_id, "methane":0,"co2":0,"ammonia":0,"temperature":0,"humidity":0,"ai_prediction":None}
+        return {
+            "sensor_id": sensor_id,
+            "methane": {"value": 0, "status": "LOW"},
+            "co2": {"value": 0, "status": "LOW"},
+            "ammonia": {"value": 0, "status": "LOW"},
+            "temperature": 0,
+            "humidity": 0,
+            "ai_prediction": None,
+            "fuzzy_risk": {"level": "LOW", "score": 0, "description": "All gases within safe range"}
+        }
+
+    # Adaptive thresholds
     t = get_adaptive_thresholds(sensor_id)
+
+    # Gas status per threshold
+    methane_status = gas_status(data.get("methane", 0), t["methane_low"], t["methane_high"])
+    co2_status = gas_status(data.get("co2", 0), 800, t["co2_high"])
+    ammonia_status = gas_status(data.get("ammonia", 0), 10, t["ammonia_high"])
+
+    # Fuzzy overall risk
+    fuzzy = evaluate_risk({"sensor_id": sensor_id, **data})
+    # Add human-readable description
+    description = ""
+    if fuzzy["level"] == "LOW":
+        description = "Gas levels are within safe limits"
+    elif fuzzy["level"] == "MEDIUM":
+        description = "Some gas levels are moderately elevated, caution advised"
+    else:
+        description = "High gas levels detected! Immediate attention required"
+
     return {
         "sensor_id": sensor_id,
-        "timestamp": data["timestamp"],
-        "methane": {"value":data.get("methane",0), "status":gas_status(data.get("methane",0), t["methane_low"], t["methane_high"])},
-        "co2": {"value":data.get("co2",0), "status":gas_status(data.get("co2",0),800,t["co2_high"])},
-        "ammonia":{"value":data.get("ammonia",0), "status":gas_status(data.get("ammonia",0),10,t["ammonia_high"])},
-        "temperature": data.get("temperature",0),
-        "humidity": data.get("humidity",0),
-        "ai_prediction": data.get("ai_prediction")
+        "timestamp": data.get("timestamp", ""),
+        "methane": {"value": data.get("methane", 0), "status": methane_status},
+        "co2": {"value": data.get("co2", 0), "status": co2_status},
+        "ammonia": {"value": data.get("ammonia", 0), "status": ammonia_status},
+        "temperature": data.get("temperature", 0),
+        "humidity": data.get("humidity", 0),
+        "ai_prediction": data.get("ai_prediction"),
+        "fuzzy_risk": {"level": fuzzy["level"], "score": fuzzy["score"], "description": description}
     }
 
 @app.get("/api/forecast/{sensor_id}")
