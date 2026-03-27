@@ -22,6 +22,9 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 
+import asyncio
+import random
+
 # =========================================================
 # CONFIG
 # =========================================================
@@ -143,9 +146,9 @@ def fuzzify(v, low, high):
 
 def evaluate_risk(data):
     t = get_adaptive_thresholds(data["sensor_id"])
-    m = fuzzify(data["methane"], t["methane_low"], t["methane_high"])
-    c = fuzzify(data["co2"], 800, t["co2_high"])
-    a = fuzzify(data["ammonia"], 10, t["ammonia_high"])
+    m = fuzzify(data.get("methane",0), t["methane_low"], t["methane_high"])
+    c = fuzzify(data.get("co2",0), 800, t["co2_high"])
+    a = fuzzify(data.get("ammonia",0), 10, t["ammonia_high"])
     score = (m*0.4 + c*0.3 + a*0.3)*100
     if score >= 75:
         return {"level":"HIGH","score":round(score,2)}
@@ -218,7 +221,7 @@ async def insert_sensor(data):
 
     # AI Prediction
     try:
-        features = [[float(data["co2"]), float(data["ammonia"]), float(data.get("temperature",0)), float(data.get("humidity",0))]]
+        features = [[float(data.get("co2",0)), float(data.get("ammonia",0)), float(data.get("temperature",0)), float(data.get("humidity",0))]]
         if scaler:
             features = scaler.transform(features)
         prediction = model.predict(features)[0]
@@ -254,28 +257,25 @@ def get_sensors():
 def sensor_summary(sensor_id: str):
     data = db.reference(f"sensorReadings/latest/{sensor_id}").get()
     if not data:
-        raise HTTPException(404,"No data")
+        return {"sensor_id": sensor_id, "methane":0,"co2":0,"ammonia":0,"temperature":0,"humidity":0,"ai_prediction":None}
     t = get_adaptive_thresholds(sensor_id)
     return {
         "sensor_id": sensor_id,
         "timestamp": data["timestamp"],
-        "methane": {"value":data["methane"], "status":gas_status(data["methane"], t["methane_low"], t["methane_high"])},
-        "co2": {"value":data["co2"], "status":gas_status(data["co2"],800,t["co2_high"])},
-        "ammonia":{"value":data["ammonia"], "status":gas_status(data["ammonia"],10,t["ammonia_high"])},
+        "methane": {"value":data.get("methane",0), "status":gas_status(data.get("methane",0), t["methane_low"], t["methane_high"])},
+        "co2": {"value":data.get("co2",0), "status":gas_status(data.get("co2",0),800,t["co2_high"])},
+        "ammonia":{"value":data.get("ammonia",0), "status":gas_status(data.get("ammonia",0),10,t["ammonia_high"])},
         "temperature": data.get("temperature",0),
         "humidity": data.get("humidity",0),
         "ai_prediction": data.get("ai_prediction")
     }
 
-# =========================================================
-# FORECAST
-# =========================================================
 @app.get("/api/forecast/{sensor_id}")
 def forecast(sensor_id):
     data = db.reference(f"sensorReadings/history/{sensor_id}").get()
     if not data:
         return {"forecast":[]}
-    values = [float(data[k]["methane"]) for k in sorted(data.keys())[-10:]]
+    values = [float(data[k].get("methane",0)) for k in sorted(data.keys())[-10:]]
     if not values:
         return {"forecast":[]}
     slope = (values[-1]-values[0])/len(values)
@@ -286,36 +286,26 @@ def forecast(sensor_id):
         future.append(round(last,2))
     return {"forecast":future}
 
-# =========================================================
-# FUZZY HEATMAP
-# =========================================================
 @app.get("/api/fuzzy/heatmap/{sensor_id}")
 def fuzzy_heatmap(sensor_id: str):
     data = db.reference(f"sensorReadings/latest/{sensor_id}").get()
     if not data:
         return {"sensor_id": sensor_id, "heatmap":[]}
     t = get_adaptive_thresholds(sensor_id)
-    def fuzz(v,low,high):
-        if v<=low: return 0
-        if v>=high: return 1
-        return (v-low)/(high-low)
     methane = float(data.get("methane",0))
     co2 = float(data.get("co2",0))
     ammonia = float(data.get("ammonia",0))
     heatmap = [
-        ["Methane", round(fuzz(methane,t["methane_low"],t["methane_high"]),2)],
-        ["CO2", round(fuzz(co2,800,t["co2_high"]),2)],
-        ["Ammonia", round(fuzz(ammonia,10,t["ammonia_high"]),2)]
+        ["Methane", round(fuzzify(methane,t["methane_low"],t["methane_high"]),2)],
+        ["CO2", round(fuzzify(co2,800,t["co2_high"]),2)],
+        ["Ammonia", round(fuzzify(ammonia,10,t["ammonia_high"]),2)]
     ]
     return {"sensor_id":sensor_id,"heatmap":heatmap}
 
-# =========================================================
-# PREDICTION ENDPOINT
-# =========================================================
 @app.post("/api/predict")
 def predict_endpoint(data: Dict[str,Any]):
     try:
-        features = [[float(data["co2"]), float(data["ammonia"]), float(data.get("temperature",0)), float(data.get("humidity",0))]]
+        features = [[float(data.get("co2",0)), float(data.get("ammonia",0)), float(data.get("temperature",0)), float(data.get("humidity",0))]]
         if scaler:
             features = scaler.transform(features)
         prediction = model.predict(features)[0]
@@ -323,44 +313,28 @@ def predict_endpoint(data: Dict[str,Any]):
     except Exception as e:
         raise HTTPException(500,str(e))
 
-# =========================================================
-# SHAP EXPLAINER
-# =========================================================
 @app.get("/api/model/explain/{sensor_id}")
 def model_explain(sensor_id: str):
     latest = db.reference(f"sensorReadings/latest/{sensor_id}").get()
     if not latest:
-        raise HTTPException(404,"No data")
-    features = np.array([[latest["co2"], latest["ammonia"], latest.get("temperature",0), latest.get("humidity",0)]])
-    explainer = shap.Explainer(model)
-    shap_values = explainer(features)
-    return JSONResponse({
-        "shap_values": shap_values.values.tolist(),
-        "base_value": shap_values.base_values.tolist(),
-        "features": ["co2","ammonia","temperature","humidity"]
-    })
+        return {"shap_values":[], "base_value":0, "features":["co2","ammonia","temperature","humidity"]}
+    features = np.array([[latest.get("co2",0), latest.get("ammonia",0), latest.get("temperature",0), latest.get("humidity",0)]])
+    try:
+        explainer = shap.Explainer(model)
+        shap_values = explainer(features)
+        return JSONResponse({
+            "shap_values": shap_values.values.tolist(),
+            "base_value": shap_values.base_values.tolist(),
+            "features": ["co2","ammonia","temperature","humidity"]
+        })
+    except:
+        return {"shap_values":[], "base_value":0, "features":["co2","ammonia","temperature","humidity"]}
 
-# =========================================================
-# MODEL METRICS
-# =========================================================
-@app.get("/api/model/metrics/{sensor_id}")
-def model_metrics(sensor_id: str):
-    history = db.reference(f"sensorReadings/history/{sensor_id}").get()
-    if not history:
-        raise HTTPException(404,"No data")
-    keys = sorted(history.keys())[-10:]
-    y_true = [float(history[k]["methane"]) for k in keys]
-    X = np.array([[history[k]["co2"],history[k]["ammonia"],history[k].get("temperature",0),history[k].get("humidity",0)] for k in keys])
-    if scaler:
-        X = scaler.transform(X)
-    y_pred = model.predict(X)
-    rmse = np.sqrt(mean_squared_error(y_true,y_pred))
-    mae = mean_absolute_error(y_true,y_pred)
-    return {"RMSE":round(rmse,2), "MAE":round(mae,2), "y_true":y_true, "y_pred":y_pred.tolist()}
+@app.get("/api/sensor/alerts/{sensor_id}")
+def get_alerts(sensor_id: str):
+    alerts = db.reference(f"sensorReadings/alerts/{sensor_id}").get()
+    return list(alerts.values()) if alerts else []
 
-# =========================================================
-# PDF REPORT
-# =========================================================
 @app.get("/api/report/{sensor_id}")
 def generate_report(sensor_id: str):
     try:
@@ -370,42 +344,40 @@ def generate_report(sensor_id: str):
         styles = getSampleStyleSheet()
         elements = []
 
-        # TITLE
-        elements.append(Paragraph("Methane Monitoring System Report", styles["Title"]))
-        elements.append(Spacer(1,10))
-
-        # FETCH DATA
         latest = db.reference(f"sensorReadings/latest/{sensor_id}").get()
         forecast_data = forecast(sensor_id)
         if not latest:
-            raise HTTPException(404,"No data")
+            return {"status":"error","message":"No data"}
+
+        # TITLE
+        elements.append(Paragraph("Methane Monitoring Report", styles["Title"]))
+        elements.append(Spacer(1,10))
 
         # SUMMARY
         elements.append(Paragraph(f"Sensor ID: {sensor_id}", styles["Normal"]))
-        elements.append(Paragraph(f"Timestamp: {latest['timestamp']}", styles["Normal"]))
-        elements.append(Spacer(1,10))
-        elements.append(Paragraph(f"Methane: {latest['methane']} ppm", styles["Normal"]))
-        elements.append(Paragraph(f"CO2: {latest['co2']} ppm", styles["Normal"]))
-        elements.append(Paragraph(f"Ammonia: {latest['ammonia']} ppm", styles["Normal"]))
+        elements.append(Paragraph(f"Timestamp: {latest.get('timestamp','')}", styles["Normal"]))
+        elements.append(Paragraph(f"Methane: {latest.get('methane',0)} ppm", styles["Normal"]))
+        elements.append(Paragraph(f"CO2: {latest.get('co2',0)} ppm", styles["Normal"]))
+        elements.append(Paragraph(f"Ammonia: {latest.get('ammonia',0)} ppm", styles["Normal"]))
         elements.append(Paragraph(f"Temperature: {latest.get('temperature',0)} °C", styles["Normal"]))
         elements.append(Paragraph(f"Humidity: {latest.get('humidity',0)} %", styles["Normal"]))
-        elements.append(Spacer(1,15))
+        elements.append(Spacer(1,10))
 
         # RISK
-        risk = evaluate_risk(latest)
+        risk = evaluate_risk({"sensor_id":sensor_id, **latest})
         elements.append(Paragraph(f"Risk Level: {risk['level']}", styles["Normal"]))
         elements.append(Paragraph(f"Risk Score: {risk['score']}", styles["Normal"]))
-        elements.append(Spacer(1,15))
+        elements.append(Spacer(1,10))
 
         # FORECAST
         elements.append(Paragraph("Methane Forecast (Next Readings):", styles["Heading2"]))
-        for f in forecast_data["forecast"]:
+        for f in forecast_data.get("forecast",[]):
             elements.append(Paragraph(f"{f} ppm", styles["Normal"]))
 
         doc.build(elements)
         return {"status":"success", "download_url":f"/api/report/download/{sensor_id}"}
     except Exception as e:
-        raise HTTPException(500,str(e))
+        return {"status":"error","message":str(e)}
 
 @app.get("/api/report/download/{sensor_id}")
 def download_report(sensor_id: str):
@@ -416,10 +388,12 @@ def download_report(sensor_id: str):
 # WEBSOCKET
 # =========================================================
 @app.websocket("/ws")
-async def ws(ws: WebSocket):
-    await manager.connect(ws)
+async def ws(websocket: WebSocket):
+    await manager.connect(websocket)
     try:
         while True:
-            await ws.receive_text()
+            data = await websocket.receive_text()
+            # Echo back latest data for demo
+            await manager.broadcast({"message": data})
     except WebSocketDisconnect:
-        manager.disconnect(ws)
+        manager.disconnect(websocket)
