@@ -80,8 +80,11 @@ def safe_get(ref, default=None):
 PH_TZ = pytz.timezone("Asia/Manila")
 
 def current_ph_time():
-    return datetime.now(PH_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now(PH_TZ)
+    return now.strftime("%Y%m%d_%H%M%S") 
 
+def readable_time():
+    return datetime.now(PH_TZ).strftime("%Y-%m-%d %H:%M:%S")
 # ==============================
 # LOAD ML MODEL
 # ==============================
@@ -231,8 +234,8 @@ async def insert_sensor(data: SensorInput):
         payload = data.dict()
         sensor_id = payload["sensor_id"]
 
-        payload["timestamp"] = current_ph_time()
-
+        timestamp_key = current_ph_time()
+        payload["timestamp"] = readable_time()   # human readable
         # ✅ compute fuzzy
         risk = get_risk(sensor_id)
         payload["risk"] = risk
@@ -241,7 +244,7 @@ async def insert_sensor(data: SensorInput):
         firebase_db.child(f"sensorReadings/latest/{sensor_id}").set(payload)
 
         firebase_db.child(
-            f"sensorReadings/history/{sensor_id}/{payload['timestamp']}"
+            f"sensorReadings/history/{sensor_id}/{timestamp_key}"
         ).set(payload)
 
         # broadcast
