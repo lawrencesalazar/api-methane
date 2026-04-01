@@ -5,10 +5,12 @@ import logging
 from typing import List
 import numpy as np
 import joblib
-from fastapi import FastAPI
+from fastapi import FastAPI, Body
 from fastapi.middleware.cors import CORSMiddleware
 import firebase_admin
 from firebase_admin import credentials, db
+from datetime import datetime
+import pytz
 
 # ==============================
 # LOGGING
@@ -36,6 +38,7 @@ FIREBASE_DB_URL = os.environ.get("FIREBASE_DB_URL")
 MODEL_PATH = os.environ.get("MODEL_PATH", "model.pkl")
 SCALER_PATH = os.environ.get("SCALER_PATH", "scaler.pkl")
 METRICS_PATH = os.environ.get("METRICS_PATH", "metrics.pkl")
+PH_TZ = pytz.timezone("Asia/Manila")
 
 # ==============================
 # GLOBALS
@@ -203,6 +206,35 @@ def get_chart(sensor_id: str):
         return {"timestamps": [], "methane": [], "co2": []}
 
 # ==============================
+# SENSOR INSERT ENDPOINT (PH TIME)
+# ==============================
+@app.post("/api/sensor/insert/{sensor_id}")
+def api_sensor_insert(sensor_id: str, payload: dict = Body(...)):
+    if firebase_db is None:
+        return {"status": "error", "message": "Firebase not initialized"}
+
+    required_fields = ["methane", "co2", "temperature", "humidity"]
+    missing = [f for f in required_fields if f not in payload]
+    if missing:
+        return {"status": "error", "message": f"Missing fields: {', '.join(missing)}"}
+
+    try:
+        now_ph = datetime.now(PH_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        payload["timestamp"] = now_ph
+
+        # Update latest
+        firebase_db.child(f"sensorReadings/latest/{sensor_id}").set(payload)
+
+        # Add to history
+        ts_key = now_ph.replace(" ", "_").replace(":", "-")
+        firebase_db.child(f"sensorReadings/history/{sensor_id}/{ts_key}").set(payload)
+
+        return {"status": "success", "message": f"Sensor data inserted for {sensor_id}", "timestamp": now_ph}
+    except Exception as e:
+        logger.error(f"❌ Failed to insert sensor data: {e}")
+        return {"status": "error", "message": str(e)}
+
+# ==============================
 # API ENDPOINTS
 # ==============================
 @app.get("/api/sensors")
@@ -232,44 +264,7 @@ def api_sensor_alerts(sensor_id: str):
 @app.get("/api/visualization/chart/{sensor_id}")
 def api_sensor_chart(sensor_id: str):
     return get_chart(sensor_id)
-from fastapi import Body
 
-@app.post("/api/sensor/insert/{sensor_id}")
-def api_sensor_insert(
-    sensor_id: str,
-    payload: dict = Body(...)
-):
-    """
-    Insert new sensor data into Firebase Realtime Database
-    Payload example:
-    {
-        "methane": 5.2,
-        "co2": 400,
-        "temperature": 28.5,
-        "humidity": 70,
-        "timestamp": "2026-04-01 10:20:30"
-    }
-    """
-    if firebase_db is None:
-        return {"status": "error", "message": "Firebase not initialized"}
-
-    required_fields = ["methane", "co2", "temperature", "humidity", "timestamp"]
-    missing = [f for f in required_fields if f not in payload]
-    if missing:
-        return {"status": "error", "message": f"Missing fields: {', '.join(missing)}"}
-
-    try:
-        # Update latest
-        firebase_db.child(f"sensorReadings/latest/{sensor_id}").set(payload)
-
-        # Add to history
-        ts_key = payload["timestamp"].replace(" ", "_").replace(":", "-")
-        firebase_db.child(f"sensorReadings/history/{sensor_id}/{ts_key}").set(payload)
-
-        return {"status": "success", "message": f"Sensor data inserted for {sensor_id}"}
-    except Exception as e:
-        logger.error(f"❌ Failed to insert sensor data: {e}")
-        return {"status": "error", "message": str(e)}
 # ==============================
 # RENDER ENTRYPOINT
 # ==============================
