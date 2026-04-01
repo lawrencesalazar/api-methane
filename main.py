@@ -4,7 +4,7 @@ import json
 import logging
 from typing import List
 import numpy as np
-import joblib   # ✅ switched from pickle
+import joblib
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import firebase_admin
@@ -61,69 +61,33 @@ if not init_firebase():
     logger.error("Firebase connection failed. Exiting...")
     raise SystemExit(1)
 
-
+# ==============================
+# FIREBASE HEALTH CHECK
+# ==============================
 def check_firebase_connection():
-    """
-    Verify Firebase and Realtime Database connection
-    """
     try:
         if firebase_db is None:
-            return {
-                "status": "error",
-                "message": "Firebase not initialized"
-            }
+            return {"status": "error", "message": "Firebase not initialized"}
 
-        # Try a simple read (root or test node)
-        test_ref = firebase_db.child("/")
-        data = test_ref.get()
+        # ✅ Correct root read (no .child("/"))
+        data = firebase_db.get()
 
         return {
             "status": "connected",
-            "message": "Firebase Realtime Database reachable",
+            "message": "Firebase reachable",
             "has_data": data is not None
         }
 
     except Exception as e:
-        logger.error(f"❌ Firebase connection check failed: {e}")
-        return {
-            "status": "error",
-            "message": str(e)
-        }
-def check_firebase_connection():
-    """
-    Verify Firebase and Realtime Database connection
-    """
-    try:
-        if firebase_db is None:
-            return {
-                "status": "error",
-                "message": "Firebase not initialized"
-            }
+        logger.error(f"❌ Firebase health check failed: {e}")
+        return {"status": "error", "message": str(e)}
 
-        # Try a simple read (root or test node)
-        test_ref = firebase_db.child("/")
-        data = test_ref.get()
-
-        return {
-            "status": "connected",
-            "message": "Firebase Realtime Database reachable",
-            "has_data": data is not None
-        }
-
-    except Exception as e:
-        logger.error(f"❌ Firebase connection check failed: {e}")
-        return {
-            "status": "error",
-            "message": str(e)
-        }
 @app.get("/api/health/firebase")
 def api_firebase_health():
-    """
-    Health check endpoint for Firebase
-    """
     return check_firebase_connection()
+
 # ==============================
-# LOAD MODEL USING JOBLIB
+# LOAD MODEL (JOBLIB)
 # ==============================
 MODEL_PATH = "model.pkl"
 SCALER_PATH = "scaler.pkl"
@@ -136,24 +100,18 @@ model_metrics = None
 def load_model_safe():
     global model, scaler, model_metrics
     try:
-        # Check files exist
         for path in [MODEL_PATH, SCALER_PATH, METRICS_PATH]:
             if not os.path.exists(path):
                 raise FileNotFoundError(f"Missing file: {path}")
 
-        # ✅ Load using joblib
         model = joblib.load(MODEL_PATH)
         scaler = joblib.load(SCALER_PATH)
         model_metrics = joblib.load(METRICS_PATH)
 
-        logger.info("✅ Joblib model, scaler, and metrics loaded successfully")
-
-    except FileNotFoundError as e:
-        logger.error(f"❌ File error: {e}")
-        sys.exit(1)
+        logger.info("✅ Model loaded (Joblib)")
 
     except Exception as e:
-        logger.error(f"❌ Failed to load ML artifacts (Joblib): {e}")
+        logger.error(f"❌ Failed to load ML artifacts: {e}")
         sys.exit(1)
 
 load_model_safe()
@@ -162,20 +120,24 @@ load_model_safe()
 # HELPERS
 # ==============================
 def list_sensors() -> List[str]:
-    data = firebase_db.child("/sensorReadings/latest").get() or {}
-    return list(data.keys())
+    try:
+        data = firebase_db.child("sensorReadings/latest").get() or {}
+        return list(data.keys())
+    except Exception as e:
+        logger.error(f"❌ list_sensors error: {e}")
+        return []
 
 def get_summary(sensor_id: str):
-    return firebase_db.child(f"/sensorReadings/latest/{sensor_id}").get() or {}
+    try:
+        return firebase_db.child(f"sensorReadings/latest/{sensor_id}").get() or {}
+    except Exception as e:
+        logger.error(f"❌ get_summary error: {e}")
+        return {}
 
 def get_risk(sensor_id: str):
-    """
-    ML + Fuzzy Logic Risk
-    """
     data = get_summary(sensor_id)
 
     try:
-        # Feature vector (match training order!)
         features = np.array([
             float(data.get("methane", 0)),
             float(data.get("co2", 0)),
@@ -183,32 +145,20 @@ def get_risk(sensor_id: str):
             float(data.get("humidity", 0))
         ]).reshape(1, -1)
 
-        # Scale
         features_scaled = scaler.transform(features)
-
-        # Predict
         predicted_risk = float(model.predict(features_scaled)[0])
 
-        # Fuzzy logic mapping
         if predicted_risk < 0.4:
-            level = "LOW"
-            score = int(predicted_risk * 25)
-            explosion_risk = 5
-
+            level, score, explosion_risk = "LOW", int(predicted_risk * 25), 5
         elif predicted_risk < 0.7:
-            level = "MEDIUM"
-            score = int(predicted_risk * 50)
-            explosion_risk = 25
-
+            level, score, explosion_risk = "MEDIUM", int(predicted_risk * 50), 25
         else:
-            level = "HIGH"
-            score = int(predicted_risk * 100)
-            explosion_risk = 60
+            level, score, explosion_risk = "HIGH", int(predicted_risk * 100), 60
 
     except Exception as e:
-        logger.warning(f"⚠️ ML failed for {sensor_id}, fallback used: {e}")
-
+        logger.warning(f"⚠️ ML fallback used: {e}")
         methane = float(data.get("methane", 0))
+
         if methane < 3:
             level, score, explosion_risk = "LOW", 10, 5
         elif methane < 7:
@@ -223,12 +173,16 @@ def get_risk(sensor_id: str):
     }
 
 def get_forecast(sensor_id: str):
-    history = firebase_db.child(f"/sensorReadings/history/{sensor_id}") \
-        .order_by_key().limit_to_last(5).get()
+    try:
+        history = firebase_db.child(f"sensorReadings/history/{sensor_id}") \
+            .order_by_key().limit_to_last(5).get()
 
-    if history:
-        return [float(v["methane"]) for v in history.values()]
-    return []
+        if history:
+            return [float(v["methane"]) for v in history.values()]
+        return []
+    except Exception as e:
+        logger.error(f"❌ forecast error: {e}")
+        return []
 
 def get_metrics(sensor_id: str):
     return model_metrics or {"RMSE": 0.5, "MAE": 0.3}
@@ -238,21 +192,22 @@ def get_alerts(sensor_id: str):
     return [{"type": "METHANE", "level": risk["level"], "score": risk["score"]}]
 
 def get_chart(sensor_id: str):
-    history = firebase_db.child(f"/sensorReadings/history/{sensor_id}") \
-        .order_by_key().limit_to_last(20).get()
+    try:
+        history = firebase_db.child(f"sensorReadings/history/{sensor_id}") \
+            .order_by_key().limit_to_last(20).get()
 
-    if not history:
+        if not history:
+            return {"timestamps": [], "methane": [], "co2": []}
+
+        timestamps = [v["timestamp"] for v in history.values()]
+        methane = [float(v["methane"]) for v in history.values()]
+        co2 = [float(v["co2"]) for v in history.values()]
+
+        return {"timestamps": timestamps, "methane": methane, "co2": co2}
+
+    except Exception as e:
+        logger.error(f"❌ chart error: {e}")
         return {"timestamps": [], "methane": [], "co2": []}
-
-    timestamps = [v["timestamp"] for v in history.values()]
-    methane = [float(v["methane"]) for v in history.values()]
-    co2 = [float(v["co2"]) for v in history.values()]
-
-    return {
-        "timestamps": timestamps,
-        "methane": methane,
-        "co2": co2
-    }
 
 # ==============================
 # API ENDPOINTS
