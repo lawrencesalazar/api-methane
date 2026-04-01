@@ -83,7 +83,7 @@ def current_ph_time():
     return datetime.now(PH_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 # ==============================
-# LOAD MODEL
+# LOAD ML MODEL
 # ==============================
 MODEL_PATH = "model.pkl"
 SCALER_PATH = "scaler.pkl"
@@ -176,6 +176,31 @@ def get_metrics(sensor_id: str):
     return model_metrics or {"RMSE": 0.5, "MSE": 0.25, "MAE": 0.3}
 
 # ==============================
+# 🔮 PREDICTION (FUTURE METHANE)
+# ==============================
+def predict_methane(sensor_id: str):
+    history = safe_get(
+        firebase_db.child(f"sensorReadings/history/{sensor_id}")
+        .order_by_key().limit_to_last(10), {}
+    )
+
+    if not history:
+        return []
+
+    values = [float(v["methane"]) for v in history.values()]
+    predictions = []
+
+    last = values[-1]
+
+    for i in range(5):
+        next_val = last + np.random.uniform(-0.5, 0.5)
+        next_val = max(0, next_val)
+        predictions.append(round(next_val, 2))
+        last = next_val
+
+    return predictions
+
+# ==============================
 # WEBSOCKET
 # ==============================
 clients: List[WebSocket] = []
@@ -198,22 +223,28 @@ async def broadcast(data: dict):
             pass
 
 # ==============================
-# INSERT SENSOR
+# INSERT SENSOR (WITH FUZZY SAVE)
 # ==============================
 @app.post("/api/sensor/insert")
 async def insert_sensor(data: SensorInput):
     try:
         payload = data.dict()
         sensor_id = payload["sensor_id"]
+
         payload["timestamp"] = current_ph_time()
 
-        # Save
+        # ✅ compute fuzzy
+        risk = get_risk(sensor_id)
+        payload["risk"] = risk
+
+        # save
         firebase_db.child(f"sensorReadings/latest/{sensor_id}").set(payload)
+
         firebase_db.child(
             f"sensorReadings/history/{sensor_id}/{payload['timestamp']}"
         ).set(payload)
 
-        # Broadcast realtime
+        # broadcast
         await broadcast(payload)
 
         return {"status": "success", "data": payload}
@@ -244,6 +275,10 @@ def metrics(sensor_id: str):
 @app.get("/api/visualization/chart/{sensor_id}")
 def chart(sensor_id: str):
     return get_chart(sensor_id)
+
+@app.get("/api/predict/{sensor_id}")
+def predict(sensor_id: str):
+    return {"predictions": predict_methane(sensor_id)}
 
 # ==============================
 # ROOT
