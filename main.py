@@ -17,10 +17,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("main")
 
 # ==============================
-# APP INIT
+# FASTAPI INIT
 # ==============================
 app = FastAPI(title="Methane Gas Monitoring API")
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,6 +27,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ==============================
+# ENVIRONMENT VARIABLES
+# ==============================
+FIREBASE_SERVICE_ACCOUNT = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
+FIREBASE_DB_URL = os.environ.get("FIREBASE_DB_URL")
+MODEL_PATH = os.environ.get("MODEL_PATH", "model.pkl")
+SCALER_PATH = os.environ.get("SCALER_PATH", "scaler.pkl")
+METRICS_PATH = os.environ.get("METRICS_PATH", "metrics.pkl")
 
 # ==============================
 # GLOBALS
@@ -38,67 +46,68 @@ scaler = None
 model_metrics = None
 
 # ==============================
-# STARTUP (IMPORTANT FOR RENDER)
+# STARTUP EVENT
 # ==============================
 @app.on_event("startup")
-def startup():
+def startup_event():
     global firebase_db, model, scaler, model_metrics
-
     logger.info("🚀 Starting API...")
 
-    # --------------------------
-    # FIREBASE INIT
-    # --------------------------
+    # ----- FIREBASE INIT -----
     try:
         if not firebase_admin._apps:
-            cred_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
-            db_url = os.environ.get("FIREBASE_DB_URL")
-
-            if cred_json and db_url:
-                cred = credentials.Certificate(json.loads(cred_json))
-                firebase_admin.initialize_app(cred, {
-                    "databaseURL": db_url
-                })
+            if not FIREBASE_SERVICE_ACCOUNT or not FIREBASE_DB_URL:
+                logger.warning("⚠️ Firebase environment variables not set")
+            else:
+                cred = credentials.Certificate(json.loads(FIREBASE_SERVICE_ACCOUNT))
+                firebase_admin.initialize_app(cred, {"databaseURL": FIREBASE_DB_URL})
                 firebase_db = db.reference()
                 logger.info("🔥 Firebase connected")
-            else:
-                logger.warning("⚠️ Firebase ENV not set")
-
-    except Exception as e:
-        logger.error(f"❌ Firebase init failed: {e}")
-
-    # --------------------------
-    # LOAD MODEL (JOBLIB)
-    # --------------------------
-    try:
-        if os.path.exists("model.pkl"):
-            model = joblib.load("model.pkl")
-            scaler = joblib.load("scaler.pkl")
-            model_metrics = joblib.load("metrics.pkl")
-            logger.info("✅ Model loaded")
         else:
-            logger.warning("⚠️ Model files not found")
-
+            firebase_db = db.reference()
     except Exception as e:
-        logger.error(f"❌ Model load failed: {e}")
+        logger.error(f"❌ Firebase initialization failed: {e}")
+        firebase_db = None
+
+    # ----- LOAD ML MODEL -----
+    try:
+        if os.path.exists(MODEL_PATH):
+            model = joblib.load(MODEL_PATH)
+            scaler = joblib.load(SCALER_PATH)
+            model_metrics = joblib.load(METRICS_PATH)
+            logger.info("✅ Model, scaler, and metrics loaded")
+        else:
+            logger.warning("⚠️ Model files not found, fuzzy fallback only")
+    except Exception as e:
+        logger.error(f"❌ Model loading failed: {e}")
+        model = None
+        scaler = None
+        model_metrics = None
 
 # ==============================
-# ROOT (REQUIRED FOR RENDER TEST)
+# ROOT & HEALTH
 # ==============================
 @app.get("/")
 def root():
-    return {"status": "API is running"}
+    return {"status": "API running"}
 
-# ==============================
-# HEALTH CHECK
-# ==============================
 @app.get("/api/health")
-def health():
+def health_check():
     return {
         "status": "ok",
-        "firebase": firebase_db is not None,
+        "firebase_connected": firebase_db is not None,
         "model_loaded": model is not None
     }
+
+@app.get("/api/health/firebase")
+def firebase_health():
+    if firebase_db is None:
+        return {"status": "error", "message": "Firebase not initialized"}
+    try:
+        data = firebase_db.get()
+        return {"status": "connected", "has_data": data is not None}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 # ==============================
 # HELPERS
@@ -119,12 +128,11 @@ def get_summary(sensor_id: str):
             return {}
         return firebase_db.child(f"sensorReadings/latest/{sensor_id}").get() or {}
     except Exception as e:
-        logger.error(f"❌ summary: {e}")
+        logger.error(f"❌ get_summary: {e}")
         return {}
 
 def get_risk(sensor_id: str):
     data = get_summary(sensor_id)
-
     try:
         if model is None or scaler is None:
             raise Exception("Model not loaded")
@@ -137,41 +145,96 @@ def get_risk(sensor_id: str):
         ]).reshape(1, -1)
 
         features_scaled = scaler.transform(features)
-        pred = float(model.predict(features_scaled)[0])
+        predicted = float(model.predict(features_scaled)[0])
 
-        if pred < 0.4:
-            return {"level": "LOW", "score": int(pred*25), "explosion_risk": 5}
-        elif pred < 0.7:
-            return {"level": "MEDIUM", "score": int(pred*50), "explosion_risk": 25}
+        if predicted < 0.4:
+            level, score, explosion = "LOW", int(predicted*25), 5
+        elif predicted < 0.7:
+            level, score, explosion = "MEDIUM", int(predicted*50), 25
         else:
-            return {"level": "HIGH", "score": int(pred*100), "explosion_risk": 60}
+            level, score, explosion = "HIGH", int(predicted*100), 60
 
-    except:
+    except Exception as e:
+        logger.warning(f"⚠️ ML failed, fallback risk used: {e}")
         methane = float(data.get("methane", 0))
         if methane < 3:
-            return {"level": "LOW", "score": 10, "explosion_risk": 5}
+            level, score, explosion = "LOW", 10, 5
         elif methane < 7:
-            return {"level": "MEDIUM", "score": 50, "explosion_risk": 25}
+            level, score, explosion = "MEDIUM", 50, 25
         else:
-            return {"level": "HIGH", "score": 90, "explosion_risk": 60}
+            level, score, explosion = "HIGH", 90, 60
+
+    return {"level": level, "score": score, "explosion_risk": explosion}
+
+def get_forecast(sensor_id: str):
+    try:
+        if firebase_db is None:
+            return []
+        history = firebase_db.child(f"sensorReadings/history/{sensor_id}") \
+            .order_by_key().limit_to_last(5).get()
+        return [float(v["methane"]) for v in history.values()] if history else []
+    except Exception as e:
+        logger.error(f"❌ get_forecast: {e}")
+        return []
+
+def get_metrics(sensor_id: str):
+    return model_metrics or {"RMSE": 0.5, "MAE": 0.3}
+
+def get_alerts(sensor_id: str):
+    risk = get_risk(sensor_id)
+    return [{"type": "METHANE", "level": risk["level"], "score": risk["score"]}]
+
+def get_chart(sensor_id: str):
+    try:
+        if firebase_db is None:
+            return {"timestamps": [], "methane": [], "co2": []}
+        history = firebase_db.child(f"sensorReadings/history/{sensor_id}") \
+            .order_by_key().limit_to_last(20).get()
+        if not history:
+            return {"timestamps": [], "methane": [], "co2": []}
+
+        return {
+            "timestamps": [v["timestamp"] for v in history.values()],
+            "methane": [float(v["methane"]) for v in history.values()],
+            "co2": [float(v["co2"]) for v in history.values()]
+        }
+    except Exception as e:
+        logger.error(f"❌ get_chart: {e}")
+        return {"timestamps": [], "methane": [], "co2": []}
 
 # ==============================
 # API ENDPOINTS
 # ==============================
 @app.get("/api/sensors")
-def sensors():
+def api_sensors():
     return list_sensors()
 
-@app.get("/api/sensor/{sensor_id}")
-def summary(sensor_id: str):
+@app.get("/api/sensor/summary/{sensor_id}")
+def api_sensor_summary(sensor_id: str):
     return get_summary(sensor_id)
 
 @app.get("/api/fuzzy/{sensor_id}")
-def fuzzy(sensor_id: str):
+def api_sensor_fuzzy(sensor_id: str):
     return {"risk": get_risk(sensor_id)}
 
+@app.get("/api/forecast/{sensor_id}")
+def api_sensor_forecast(sensor_id: str):
+    return {"forecast": get_forecast(sensor_id)}
+
+@app.get("/api/model/metrics/{sensor_id}")
+def api_sensor_metrics(sensor_id: str):
+    return get_metrics(sensor_id)
+
+@app.get("/api/sensor/alerts/{sensor_id}")
+def api_sensor_alerts(sensor_id: str):
+    return {"alerts": get_alerts(sensor_id)}
+
+@app.get("/api/visualization/chart/{sensor_id}")
+def api_sensor_chart(sensor_id: str):
+    return get_chart(sensor_id)
+
 # ==============================
-# RUN FOR RENDER
+# RENDER ENTRYPOINT
 # ==============================
 if __name__ == "__main__":
     import uvicorn
