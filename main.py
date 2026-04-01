@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import firebase_admin
 from firebase_admin import credentials, db
+import sys
 
 # ==============================
 # LOGGING
@@ -61,7 +62,7 @@ if not init_firebase():
     raise SystemExit(1)
 
 # ==============================
-# LOAD TRAINED MODEL & SCALER
+# LOAD TRAINED MODEL & SCALER (SAFE)
 # ==============================
 MODEL_PATH = "model.pkl"
 SCALER_PATH = "scaler.pkl"
@@ -71,21 +72,37 @@ model = None
 scaler = None
 model_metrics = None
 
-def load_model():
+def load_model_safe():
     global model, scaler, model_metrics
     try:
+        # Ensure files exist
+        for path in [MODEL_PATH, SCALER_PATH, METRICS_PATH]:
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"File not found: {path}")
+
+        # Load in binary mode
         with open(MODEL_PATH, "rb") as f:
             model = pickle.load(f)
         with open(SCALER_PATH, "rb") as f:
             scaler = pickle.load(f)
         with open(METRICS_PATH, "rb") as f:
             model_metrics = pickle.load(f)
-        logger.info("✅ Model, scaler, and metrics loaded successfully")
-    except Exception as e:
-        logger.error(f"Failed to load ML artifacts: {e}")
-        raise SystemExit(1)
 
-load_model()
+        logger.info("✅ Model, scaler, and metrics loaded successfully")
+
+    except FileNotFoundError as fnf:
+        logger.error(f"ML artifact missing: {fnf}")
+        sys.exit(1)
+
+    except (pickle.UnpicklingError, EOFError, AttributeError, ValueError) as e:
+        logger.error(f"ML artifact corrupted or invalid format: {e}")
+        sys.exit(1)
+
+    except Exception as e:
+        logger.error(f"Unexpected error loading ML artifacts: {e}")
+        sys.exit(1)
+
+load_model_safe()
 
 # ==============================
 # HELPERS
@@ -100,7 +117,7 @@ def get_summary(sensor_id: str):
 
 def get_risk(sensor_id: str):
     """
-    Get fuzzy risk using ML model prediction
+    Get fuzzy risk using ML model prediction, fallback to threshold if model fails
     """
     data = get_summary(sensor_id)
     try:
@@ -127,8 +144,8 @@ def get_risk(sensor_id: str):
             level, score, explosion_risk = "HIGH", int(predicted_risk*100), 60
 
     except Exception as e:
-        logger.error(f"Fuzzy risk calculation error for {sensor_id}: {e}")
-        # Fallback to threshold logic
+        logger.warning(f"ML prediction failed for {sensor_id}, using threshold fallback: {e}")
+        # Fallback threshold logic
         methane = float(data.get("methane", 0))
         if methane < 3:
             level, score, explosion_risk = "LOW", 10, 5
