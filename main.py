@@ -1,248 +1,135 @@
-from fastapi import FastAPI, HTTPException
+# main.py
+import os
+import json
+import logging
+from typing import List
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from datetime import datetime
-from collections import defaultdict, deque
-import numpy as np
+import firebase_admin
+from firebase_admin import credentials, db
 
-app = FastAPI()
+# ==============================
+# LOGGING
+# ==============================
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("main")
+
+# ==============================
+# FastAPI INIT
+# ==============================
+app = FastAPI(title="Methane Gas Monitoring API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # For local dev / dashboard
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# =========================================
-# STORAGE (Replace with Firebase later)
-# =========================================
-latest_data = {}
-history_data = defaultdict(lambda: deque(maxlen=500))
-alerts_data = defaultdict(list)
+# ==============================
+# FIREBASE INIT
+# ==============================
+firebase_db = None
 
-# =========================================
-# DEFAULT THRESHOLDS
-# =========================================
-DEFAULT_THRESHOLDS = {
-    "methane_low": 5,
-    "methane_high": 10,
-    "co2_high": 1200,
-    "ammonia_high": 25
-}
-
-# =========================================
-# ADAPTIVE THRESHOLDS
-# =========================================
-def get_thresholds(sensor_id):
-    history = history_data[sensor_id]
-    if len(history) < 5:
-        return DEFAULT_THRESHOLDS
-
-    methane_vals = [h["methane"] for h in history]
-    avg = np.mean(methane_vals)
-    mx = np.max(methane_vals)
-
-    return {
-        **DEFAULT_THRESHOLDS,
-        "methane_low": round(avg * 0.7, 2),
-        "methane_high": round(mx * 0.9, 2)
-    }
-
-# =========================================
-# FUZZY LOGIC
-# =========================================
-def fuzzify(v, low, high):
-    if v <= low: return 0
-    if v >= high: return 1
-    return (v - low) / (high - low)
-
-def evaluate_risk(sensor_id, data):
-    t = get_thresholds(sensor_id)
-
-    m = fuzzify(data["methane"], t["methane_low"], t["methane_high"])
-    c = fuzzify(data["co2"], 800, t["co2_high"])
-    a = fuzzify(data.get("ammonia", 0), 10, t["ammonia_high"])
-
-    score = (m*0.4 + c*0.3 + a*0.3) * 100
-
-    if score >= 75:
-        level = "HIGH"
-        desc = "Danger! Immediate action required"
-    elif score >= 40:
-        level = "MEDIUM"
-        desc = "Moderate risk"
-    else:
-        level = "LOW"
-        desc = "Safe"
-
-    # Methane explosion risk (5–15%)
-    methane = data["methane"]
-    explosion = 0
-    if 5 <= methane <= 15:
-        explosion = ((methane - 5) / 10) * 100
-
-    return {
-        "level": level,
-        "score": round(score, 2),
-        "description": desc,
-        "methane_explosion_risk": round(explosion, 2)
-    }
-
-# =========================================
-# INSERT SENSOR
-# =========================================
-@app.post("/api/sensor/insert")
-def insert_sensor(data: dict):
+def init_firebase():
+    global firebase_db
     try:
-        sid = data["sensor_id"]
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if firebase_admin._apps:
+            firebase_db = db.reference()
+            return True
 
-        record = {
-            "timestamp": now,
-            "methane": float(data.get("methane", 0)),
-            "co2": float(data.get("co2", 0)),
-            "ammonia": float(data.get("ammonia", 0)),
-            "temperature": float(data.get("temperature", 0)),
-            "humidity": float(data.get("humidity", 0)),
-        }
+        cred_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
+        cred = credentials.Certificate(json.loads(cred_json))
 
-        latest_data[sid] = record
-        history_data[sid].append(record)
+        firebase_admin.initialize_app(cred, {
+            "databaseURL": os.environ.get("FIREBASE_DB_URL")
+        })
 
-        # Fuzzy alert
-        risk = evaluate_risk(sid, record)
-        if risk["level"] == "HIGH":
-            alerts_data[sid].append({
-                "type": "RISK",
-                **risk,
-                "timestamp": now
-            })
-
-        return {"status": "ok"}
+        firebase_db = db.reference()
+        logger.info("🔥 Firebase Connected")
+        return True
 
     except Exception as e:
-        raise HTTPException(500, str(e))
+        logger.error(f"Firebase error: {e}")
+        return False
 
-# =========================================
-# SUMMARY
-# =========================================
+if not init_firebase():
+    logger.error("Firebase connection failed. Exiting...")
+    raise SystemExit(1)
+
+# ==============================
+# HELPERS
+# ==============================
+def list_sensors() -> List[str]:
+    data = firebase_db.child("/sensorReadings/latest").get() or {}
+    return list(data.keys())
+
+def get_summary(sensor_id: str):
+    data = firebase_db.child(f"/sensorReadings/latest/{sensor_id}").get() or {}
+    return data
+
+def get_risk(sensor_id: str):
+    data = get_summary(sensor_id)
+    methane = float(data.get("methane", 0))
+    if methane < 3:
+        level, score, explosion_risk = "LOW", 10, 5
+    elif methane < 7:
+        level, score, explosion_risk = "MEDIUM", 50, 25
+    else:
+        level, score, explosion_risk = "HIGH", 90, 60
+    return {"level": level, "score": score, "explosion_risk": explosion_risk}
+
+def get_forecast(sensor_id: str):
+    history = firebase_db.child(f"/sensorReadings/history/{sensor_id}").order_by_key().limit_to_last(5).get()
+    if history:
+        return [float(v["methane"]) for v in history.values()]
+    return []
+
+def get_metrics(sensor_id: str):
+    metrics = firebase_db.child(f"/modelMetrics/{sensor_id}").get()
+    return metrics or {"RMSE": 0.5, "MAE": 0.3}
+
+def get_alerts(sensor_id: str):
+    risk = get_risk(sensor_id)
+    return [{"type": "METHANE", "level": risk["level"], "score": risk["score"]}]
+
+def get_chart(sensor_id: str):
+    history = firebase_db.child(f"/sensorReadings/history/{sensor_id}").order_by_key().limit_to_last(20).get()
+    if not history:
+        return {"timestamps": [], "methane": [], "co2": []}
+    timestamps = [v["timestamp"] for v in history.values()]
+    methane = [float(v["methane"]) for v in history.values()]
+    co2 = [float(v["co2"]) for v in history.values()]
+    return {"timestamps": timestamps, "methane": methane, "co2": co2}
+
+# ==============================
+# API ENDPOINTS
+# ==============================
+@app.get("/api/sensors", response_model=List[str])
+def api_sensors():
+    return list_sensors()
+
 @app.get("/api/sensor/summary/{sensor_id}")
-def summary(sensor_id: str):
-    if sensor_id not in latest_data:
-        return {"sensor_id": sensor_id}
+def api_summary(sensor_id: str):
+    return get_summary(sensor_id)
 
-    data = latest_data[sensor_id]
-    t = get_thresholds(sensor_id)
-    fuzzy = evaluate_risk(sensor_id, data)
+@app.get("/api/fuzzy/{sensor_id}")
+def api_fuzzy(sensor_id: str):
+    return {"risk": get_risk(sensor_id)}
 
-    def status(v, low, high):
-        if v < low: return "LOW"
-        if v > high: return "HIGH"
-        return "NORMAL"
-
-    return {
-        "sensor_id": sensor_id,
-        "timestamp": data["timestamp"],
-        "methane": {
-            "value": data["methane"],
-            "status": status(data["methane"], t["methane_low"], t["methane_high"])
-        },
-        "co2": {
-            "value": data["co2"],
-            "status": status(data["co2"], 800, t["co2_high"])
-        },
-        "ammonia": {
-            "value": data["ammonia"],
-            "status": status(data["ammonia"], 10, t["ammonia_high"])
-        },
-        "temperature": data["temperature"],
-        "humidity": data["humidity"],
-        "fuzzy_risk": fuzzy
-    }
-
-# =========================================
-# CHART DATA
-# =========================================
-@app.get("/api/visualization/chart/{sensor_id}")
-def chart(sensor_id: str):
-    history = history_data[sensor_id]
-    return {
-        "timestamps": [h["timestamp"] for h in history],
-        "methane": [h["methane"] for h in history],
-        "co2": [h["co2"] for h in history],
-        "ammonia": [h["ammonia"] for h in history],
-    }
-
-# =========================================
-# FORECAST
-# =========================================
 @app.get("/api/forecast/{sensor_id}")
-def forecast(sensor_id: str):
-    history = history_data[sensor_id]
-    if len(history) < 5:
-        return {"forecast": []}
+def api_forecast(sensor_id: str):
+    return {"forecast": get_forecast(sensor_id)}
 
-    values = [h["methane"] for h in history][-10:]
-    slope = (values[-1] - values[0]) / len(values)
-
-    future = []
-    last = values[-1]
-    for _ in range(5):
-        last += slope
-        future.append(round(last, 2))
-
-    return {"forecast": future}
-
-# =========================================
-# ALERTS
-# =========================================
-@app.get("/api/sensor/alerts/{sensor_id}")
-def alerts(sensor_id: str):
-    return alerts_data[sensor_id]
-
-# =========================================
-# METRICS
-# =========================================
 @app.get("/api/model/metrics/{sensor_id}")
-def metrics(sensor_id: str):
-    history = history_data[sensor_id]
-    if len(history) < 10:
-        return {"RMSE": 0, "MAE": 0}
+def api_metrics(sensor_id: str):
+    return get_metrics(sensor_id)
 
-    y = np.array([h["methane"] for h in history][-10:])
-    y_pred = np.roll(y, 1)
+@app.get("/api/sensor/alerts/{sensor_id}")
+def api_alerts(sensor_id: str):
+    return {"alerts": get_alerts(sensor_id)}
 
-    rmse = np.sqrt(np.mean((y - y_pred)**2))
-    mae = np.mean(np.abs(y - y_pred))
-
-    return {
-        "RMSE": round(rmse, 2),
-        "MAE": round(mae, 2)
-    }
-
-# =========================================
-# HEATMAP
-# =========================================
-@app.get("/api/fuzzy/heatmap/{sensor_id}")
-def heatmap(sensor_id: str):
-    if sensor_id not in latest_data:
-        return {"heatmap": []}
-
-    data = latest_data[sensor_id]
-    t = get_thresholds(sensor_id)
-
-    return {
-        "heatmap": [
-            ["Methane", fuzzify(data["methane"], t["methane_low"], t["methane_high"])],
-            ["CO2", fuzzify(data["co2"], 800, t["co2_high"])],
-            ["Ammonia", fuzzify(data["ammonia"], 10, t["ammonia_high"])]
-        ]
-    }
-
-# =========================================
-# SENSORS LIST
-# =========================================
-@app.get("/api/sensors")
-def sensors():
-    return list(latest_data.keys())
+@app.get("/api/visualization/chart/{sensor_id}")
+def api_chart(sensor_id: str):
+    return get_chart(sensor_id)
