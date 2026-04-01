@@ -9,7 +9,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import firebase_admin
 from firebase_admin import credentials, db
-import sys
 
 # ==============================
 # LOGGING
@@ -31,6 +30,16 @@ app.add_middleware(
 )
 
 # ==============================
+# ENV VARIABLES
+# ==============================
+FIREBASE_SERVICE_ACCOUNT = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
+FIREBASE_DB_URL = os.environ.get("FIREBASE_DB_URL")
+
+MODEL_PATH = os.environ.get("MODEL_PATH", "model.pkl")
+SCALER_PATH = os.environ.get("SCALER_PATH", "scaler.pkl")
+METRICS_PATH = os.environ.get("METRICS_PATH", "metrics.pkl")
+
+# ==============================
 # FIREBASE INIT
 # ==============================
 firebase_db = None
@@ -42,11 +51,17 @@ def init_firebase():
             firebase_db = db.reference()
             return True
 
-        cred_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
-        cred = credentials.Certificate(json.loads(cred_json))
+        if not FIREBASE_SERVICE_ACCOUNT:
+            raise Exception("Missing FIREBASE_SERVICE_ACCOUNT env")
+
+        if not FIREBASE_DB_URL:
+            raise Exception("Missing FIREBASE_DB_URL env")
+
+        cred_dict = json.loads(FIREBASE_SERVICE_ACCOUNT)
+        cred = credentials.Certificate(cred_dict)
 
         firebase_admin.initialize_app(cred, {
-            "databaseURL": os.environ.get("FIREBASE_DB_URL")
+            "databaseURL": FIREBASE_DB_URL
         })
 
         firebase_db = db.reference()
@@ -54,45 +69,12 @@ def init_firebase():
         return True
 
     except Exception as e:
-        logger.error(f"Firebase error: {e}")
+        logger.error(f"❌ Firebase init error: {e}")
         return False
-
-if not init_firebase():
-    logger.error("Firebase connection failed. Exiting...")
-    raise SystemExit(1)
-
-# ==============================
-# FIREBASE HEALTH CHECK
-# ==============================
-def check_firebase_connection():
-    try:
-        if firebase_db is None:
-            return {"status": "error", "message": "Firebase not initialized"}
-
-        # ✅ Correct root read (no .child("/"))
-        data = firebase_db.get()
-
-        return {
-            "status": "connected",
-            "message": "Firebase reachable",
-            "has_data": data is not None
-        }
-
-    except Exception as e:
-        logger.error(f"❌ Firebase health check failed: {e}")
-        return {"status": "error", "message": str(e)}
-
-@app.get("/api/health/firebase")
-def api_firebase_health():
-    return check_firebase_connection()
 
 # ==============================
 # LOAD MODEL (JOBLIB)
 # ==============================
-MODEL_PATH = "model.pkl"
-SCALER_PATH = "scaler.pkl"
-METRICS_PATH = "metrics.pkl"
-
 model = None
 scaler = None
 model_metrics = None
@@ -108,13 +90,53 @@ def load_model_safe():
         scaler = joblib.load(SCALER_PATH)
         model_metrics = joblib.load(METRICS_PATH)
 
-        logger.info("✅ Model loaded (Joblib)")
+        logger.info("✅ Model loaded successfully")
 
     except Exception as e:
-        logger.error(f"❌ Failed to load ML artifacts: {e}")
-        sys.exit(1)
+        logger.error(f"❌ Model load failed: {e}")
+        # ⚠️ DO NOT EXIT → prevents Render crash
+        model = None
+        scaler = None
+        model_metrics = None
 
-load_model_safe()
+# ==============================
+# STARTUP EVENTS
+# ==============================
+@app.on_event("startup")
+def startup_event():
+    logger.info("🚀 Starting API...")
+
+    fb_status = init_firebase()
+    if not fb_status:
+        logger.warning("⚠️ Firebase not connected")
+
+    load_model_safe()
+
+# ==============================
+# HEALTH CHECK
+# ==============================
+def check_firebase_connection():
+    try:
+        if firebase_db is None:
+            return {"status": "error", "message": "Firebase not initialized"}
+
+        data = firebase_db.get()
+
+        return {
+            "status": "connected",
+            "has_data": data is not None
+        }
+
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.get("/")
+def root():
+    return {"status": "API running"}
+
+@app.get("/api/health/firebase")
+def api_firebase_health():
+    return check_firebase_connection()
 
 # ==============================
 # HELPERS
@@ -131,13 +153,16 @@ def get_summary(sensor_id: str):
     try:
         return firebase_db.child(f"sensorReadings/latest/{sensor_id}").get() or {}
     except Exception as e:
-        logger.error(f"❌ get_summary error: {e}")
+        logger.error(f"❌ summary error: {e}")
         return {}
 
 def get_risk(sensor_id: str):
     data = get_summary(sensor_id)
 
     try:
+        if model is None or scaler is None:
+            raise Exception("Model not loaded")
+
         features = np.array([
             float(data.get("methane", 0)),
             float(data.get("co2", 0)),
@@ -156,7 +181,7 @@ def get_risk(sensor_id: str):
             level, score, explosion_risk = "HIGH", int(predicted_risk * 100), 60
 
     except Exception as e:
-        logger.warning(f"⚠️ ML fallback used: {e}")
+        logger.warning(f"⚠️ fallback used: {e}")
         methane = float(data.get("methane", 0))
 
         if methane < 3:
@@ -166,20 +191,15 @@ def get_risk(sensor_id: str):
         else:
             level, score, explosion_risk = "HIGH", 90, 60
 
-    return {
-        "level": level,
-        "score": score,
-        "explosion_risk": explosion_risk
-    }
+    return {"level": level, "score": score, "explosion_risk": explosion_risk}
 
 def get_forecast(sensor_id: str):
     try:
         history = firebase_db.child(f"sensorReadings/history/{sensor_id}") \
             .order_by_key().limit_to_last(5).get()
 
-        if history:
-            return [float(v["methane"]) for v in history.values()]
-        return []
+        return [float(v["methane"]) for v in history.values()] if history else []
+
     except Exception as e:
         logger.error(f"❌ forecast error: {e}")
         return []
@@ -199,11 +219,11 @@ def get_chart(sensor_id: str):
         if not history:
             return {"timestamps": [], "methane": [], "co2": []}
 
-        timestamps = [v["timestamp"] for v in history.values()]
-        methane = [float(v["methane"]) for v in history.values()]
-        co2 = [float(v["co2"]) for v in history.values()]
-
-        return {"timestamps": timestamps, "methane": methane, "co2": co2}
+        return {
+            "timestamps": [v["timestamp"] for v in history.values()],
+            "methane": [float(v["methane"]) for v in history.values()],
+            "co2": [float(v["co2"]) for v in history.values()]
+        }
 
     except Exception as e:
         logger.error(f"❌ chart error: {e}")
@@ -212,7 +232,7 @@ def get_chart(sensor_id: str):
 # ==============================
 # API ENDPOINTS
 # ==============================
-@app.get("/api/sensors", response_model=List[str])
+@app.get("/api/sensors")
 def api_sensors():
     return list_sensors()
 
@@ -240,10 +260,11 @@ def api_alerts(sensor_id: str):
 def api_chart(sensor_id: str):
     return get_chart(sensor_id)
 
-
-# ===========
-# Run the application
+# ==============================
+# RUN (RENDER COMPATIBLE)
+# ==============================
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
