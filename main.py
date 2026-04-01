@@ -207,10 +207,10 @@ def api_metrics(sensor_id: str):
     """
     return get_metrics(sensor_id)
 
-@app.get("/api/sensor/alerts/{sensor_id}")
-def api_alerts(sensor_id: str):
-    return {"alerts": get_alerts(sensor_id)}
-
 @app.get("/api/visualization/chart/{sensor_id}")
 def api_chart(sensor_id: str):
     return get_chart(sensor_id)
+
+@app.get("/api/sensor/alerts/{sensor_id}")
+def api_alerts(sensor_id: str):
+    return {"alerts": get_alerts(sensor_id)}
