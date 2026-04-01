@@ -3,8 +3,8 @@ import os
 import json
 import logging
 from typing import List
-import pickle
 import numpy as np
+import joblib   # ✅ switched from pickle
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import firebase_admin
@@ -24,7 +24,7 @@ app = FastAPI(title="Methane Gas Monitoring API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For local dev / dashboard
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -62,7 +62,7 @@ if not init_firebase():
     raise SystemExit(1)
 
 # ==============================
-# LOAD TRAINED MODEL & SCALER (SAFE)
+# LOAD MODEL USING JOBLIB
 # ==============================
 MODEL_PATH = "model.pkl"
 SCALER_PATH = "scaler.pkl"
@@ -75,31 +75,24 @@ model_metrics = None
 def load_model_safe():
     global model, scaler, model_metrics
     try:
-        # Ensure files exist
+        # Check files exist
         for path in [MODEL_PATH, SCALER_PATH, METRICS_PATH]:
             if not os.path.exists(path):
-                raise FileNotFoundError(f"File not found: {path}")
+                raise FileNotFoundError(f"Missing file: {path}")
 
-        # Load in binary mode
-        with open(MODEL_PATH, "rb") as f:
-            model = pickle.load(f)
-        with open(SCALER_PATH, "rb") as f:
-            scaler = pickle.load(f)
-        with open(METRICS_PATH, "rb") as f:
-            model_metrics = pickle.load(f)
+        # ✅ Load using joblib
+        model = joblib.load(MODEL_PATH)
+        scaler = joblib.load(SCALER_PATH)
+        model_metrics = joblib.load(METRICS_PATH)
 
-        logger.info("✅ Model, scaler, and metrics loaded successfully")
+        logger.info("✅ Joblib model, scaler, and metrics loaded successfully")
 
-    except FileNotFoundError as fnf:
-        logger.error(f"ML artifact missing: {fnf}")
-        sys.exit(1)
-
-    except (pickle.UnpicklingError, EOFError, AttributeError, ValueError) as e:
-        logger.error(f"ML artifact corrupted or invalid format: {e}")
+    except FileNotFoundError as e:
+        logger.error(f"❌ File error: {e}")
         sys.exit(1)
 
     except Exception as e:
-        logger.error(f"Unexpected error loading ML artifacts: {e}")
+        logger.error(f"❌ Failed to load ML artifacts (Joblib): {e}")
         sys.exit(1)
 
 load_model_safe()
@@ -112,16 +105,16 @@ def list_sensors() -> List[str]:
     return list(data.keys())
 
 def get_summary(sensor_id: str):
-    data = firebase_db.child(f"/sensorReadings/latest/{sensor_id}").get() or {}
-    return data
+    return firebase_db.child(f"/sensorReadings/latest/{sensor_id}").get() or {}
 
 def get_risk(sensor_id: str):
     """
-    Get fuzzy risk using ML model prediction, fallback to threshold if model fails
+    ML + Fuzzy Logic Risk
     """
     data = get_summary(sensor_id)
+
     try:
-        # Prepare features: order must match training
+        # Feature vector (match training order!)
         features = np.array([
             float(data.get("methane", 0)),
             float(data.get("co2", 0)),
@@ -129,23 +122,31 @@ def get_risk(sensor_id: str):
             float(data.get("humidity", 0))
         ]).reshape(1, -1)
 
-        # Scale features
+        # Scale
         features_scaled = scaler.transform(features)
 
-        # Predict numeric risk score
+        # Predict
         predicted_risk = float(model.predict(features_scaled)[0])
 
-        # Apply fuzzy logic thresholds
+        # Fuzzy logic mapping
         if predicted_risk < 0.4:
-            level, score, explosion_risk = "LOW", int(predicted_risk*25), 5
+            level = "LOW"
+            score = int(predicted_risk * 25)
+            explosion_risk = 5
+
         elif predicted_risk < 0.7:
-            level, score, explosion_risk = "MEDIUM", int(predicted_risk*50), 25
+            level = "MEDIUM"
+            score = int(predicted_risk * 50)
+            explosion_risk = 25
+
         else:
-            level, score, explosion_risk = "HIGH", int(predicted_risk*100), 60
+            level = "HIGH"
+            score = int(predicted_risk * 100)
+            explosion_risk = 60
 
     except Exception as e:
-        logger.warning(f"ML prediction failed for {sensor_id}, using threshold fallback: {e}")
-        # Fallback threshold logic
+        logger.warning(f"⚠️ ML failed for {sensor_id}, fallback used: {e}")
+
         methane = float(data.get("methane", 0))
         if methane < 3:
             level, score, explosion_risk = "LOW", 10, 5
@@ -154,10 +155,16 @@ def get_risk(sensor_id: str):
         else:
             level, score, explosion_risk = "HIGH", 90, 60
 
-    return {"level": level, "score": score, "explosion_risk": explosion_risk}
+    return {
+        "level": level,
+        "score": score,
+        "explosion_risk": explosion_risk
+    }
 
 def get_forecast(sensor_id: str):
-    history = firebase_db.child(f"/sensorReadings/history/{sensor_id}").order_by_key().limit_to_last(5).get()
+    history = firebase_db.child(f"/sensorReadings/history/{sensor_id}") \
+        .order_by_key().limit_to_last(5).get()
+
     if history:
         return [float(v["methane"]) for v in history.values()]
     return []
@@ -170,13 +177,21 @@ def get_alerts(sensor_id: str):
     return [{"type": "METHANE", "level": risk["level"], "score": risk["score"]}]
 
 def get_chart(sensor_id: str):
-    history = firebase_db.child(f"/sensorReadings/history/{sensor_id}").order_by_key().limit_to_last(20).get()
+    history = firebase_db.child(f"/sensorReadings/history/{sensor_id}") \
+        .order_by_key().limit_to_last(20).get()
+
     if not history:
         return {"timestamps": [], "methane": [], "co2": []}
+
     timestamps = [v["timestamp"] for v in history.values()]
     methane = [float(v["methane"]) for v in history.values()]
     co2 = [float(v["co2"]) for v in history.values()]
-    return {"timestamps": timestamps, "methane": methane, "co2": co2}
+
+    return {
+        "timestamps": timestamps,
+        "methane": methane,
+        "co2": co2
+    }
 
 # ==============================
 # API ENDPOINTS
@@ -191,9 +206,6 @@ def api_summary(sensor_id: str):
 
 @app.get("/api/fuzzy/{sensor_id}")
 def api_fuzzy(sensor_id: str):
-    """
-    Returns fuzzy logic risk based on ML model prediction
-    """
     return {"risk": get_risk(sensor_id)}
 
 @app.get("/api/forecast/{sensor_id}")
@@ -202,15 +214,12 @@ def api_forecast(sensor_id: str):
 
 @app.get("/api/model/metrics/{sensor_id}")
 def api_metrics(sensor_id: str):
-    """
-    Return saved model performance metrics
-    """
     return get_metrics(sensor_id)
-
-@app.get("/api/visualization/chart/{sensor_id}")
-def api_chart(sensor_id: str):
-    return get_chart(sensor_id)
 
 @app.get("/api/sensor/alerts/{sensor_id}")
 def api_alerts(sensor_id: str):
     return {"alerts": get_alerts(sensor_id)}
+
+@app.get("/api/visualization/chart/{sensor_id}")
+def api_chart(sensor_id: str):
+    return get_chart(sensor_id)
