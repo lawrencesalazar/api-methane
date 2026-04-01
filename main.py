@@ -61,6 +61,67 @@ if not init_firebase():
     logger.error("Firebase connection failed. Exiting...")
     raise SystemExit(1)
 
+
+def check_firebase_connection():
+    """
+    Verify Firebase and Realtime Database connection
+    """
+    try:
+        if firebase_db is None:
+            return {
+                "status": "error",
+                "message": "Firebase not initialized"
+            }
+
+        # Try a simple read (root or test node)
+        test_ref = firebase_db.child("/")
+        data = test_ref.get()
+
+        return {
+            "status": "connected",
+            "message": "Firebase Realtime Database reachable",
+            "has_data": data is not None
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Firebase connection check failed: {e}")
+        return {
+            "status": "error",
+            "message": str(e)
+        }
+def check_firebase_connection():
+    """
+    Verify Firebase and Realtime Database connection
+    """
+    try:
+        if firebase_db is None:
+            return {
+                "status": "error",
+                "message": "Firebase not initialized"
+            }
+
+        # Try a simple read (root or test node)
+        test_ref = firebase_db.child("/")
+        data = test_ref.get()
+
+        return {
+            "status": "connected",
+            "message": "Firebase Realtime Database reachable",
+            "has_data": data is not None
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Firebase connection check failed: {e}")
+        return {
+            "status": "error",
+            "message": str(e)
+        }
+@app.get("/api/health/firebase")
+def api_firebase_health():
+    """
+    Health check endpoint for Firebase
+    """
+    return check_firebase_connection()
 # ==============================
 # LOAD MODEL USING JOBLIB
 # ==============================
