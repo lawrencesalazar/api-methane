@@ -6,10 +6,11 @@ from typing import List
 from datetime import datetime
 import pytz
 import numpy as np
+import pandas as pd
 import joblib
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 import firebase_admin
 from firebase_admin import credentials, db
 import sys
@@ -21,13 +22,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("main")
 
 # ==============================
-# FastAPI INIT
+# FASTAPI INIT
 # ==============================
 app = FastAPI(title="Methane Gas Monitoring API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow dashboard
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -46,8 +47,6 @@ def init_firebase():
             return True
 
         cred_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
-        if not cred_json:
-            raise Exception("FIREBASE_SERVICE_ACCOUNT env not set")
         cred = credentials.Certificate(json.loads(cred_json))
 
         firebase_admin.initialize_app(cred, {
@@ -59,48 +58,32 @@ def init_firebase():
         return True
 
     except Exception as e:
-        logger.error(f"Firebase init error: {e}")
+        logger.error(f"Firebase error: {e}")
         return False
 
 if not init_firebase():
-    logger.error("Firebase connection failed. Exiting...")
     sys.exit(1)
 
 # ==============================
-# SAFE FIREBASE READ
+# SAFE FIREBASE
 # ==============================
 def safe_get(ref, default=None):
     try:
         return ref.get()
     except Exception as e:
-        logger.error(f"Firebase read failed: {e}")
+        logger.error(f"Firebase read error: {e}")
         return default
 
 # ==============================
-# CHECK FIREBASE CONNECTION
+# TIMEZONE (PH)
 # ==============================
-def check_firebase_connection():
-    try:
-        if firebase_db is None:
-            return {"status": "error", "message": "Firebase not initialized"}
+PH_TZ = pytz.timezone("Asia/Manila")
 
-        # Test simple read
-        data = safe_get(firebase_db.child("sensorReadings/latest"), {})
-        return {
-            "status": "connected",
-            "message": "Firebase reachable",
-            "has_data": bool(data)
-        }
-
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-@app.get("/api/health/firebase")
-def api_firebase_health():
-    return check_firebase_connection()
+def current_ph_time():
+    return datetime.now(PH_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 # ==============================
-# LOAD MODEL + SCALER + METRICS
+# LOAD MODEL
 # ==============================
 MODEL_PATH = "model.pkl"
 SCALER_PATH = "scaler.pkl"
@@ -110,38 +93,32 @@ model = None
 scaler = None
 model_metrics = None
 
-def load_model_safe():
+def load_model():
     global model, scaler, model_metrics
     try:
-        for path in [MODEL_PATH, SCALER_PATH, METRICS_PATH]:
-            if not os.path.exists(path):
-                raise FileNotFoundError(f"Missing ML artifact: {path}")
-
         model = joblib.load(MODEL_PATH)
         scaler = joblib.load(SCALER_PATH)
         model_metrics = joblib.load(METRICS_PATH)
-
-        logger.info("✅ Joblib ML artifacts loaded")
-
+        logger.info("✅ ML Model Loaded")
     except Exception as e:
-        logger.error(f"Failed to load ML artifacts: {e}")
+        logger.error(f"ML load error: {e}")
         sys.exit(1)
 
-load_model_safe()
+load_model()
 
 # ==============================
-# TIMEZONE
+# PYDANTIC MODEL
 # ==============================
-PH_TZ = pytz.timezone("Asia/Manila")
-
-def current_ph_time():
-    return datetime.now(PH_TZ).strftime("%Y-%m-%d %H:%M:%S")
+class SensorInput(BaseModel):
+    sensor_id: str
+    methane: float
+    co2: float
+    temperature: float
+    humidity: float
 
 # ==============================
 # HELPERS
 # ==============================
-import pandas as pd
-
 def list_sensors() -> List[str]:
     data = safe_get(firebase_db.child("sensorReadings/latest"), {})
     return list(data.keys()) if data else []
@@ -151,8 +128,8 @@ def get_summary(sensor_id: str):
 
 def get_risk(sensor_id: str):
     data = get_summary(sensor_id)
+
     try:
-        # Feature names must match training
         features = pd.DataFrame([{
             "methane": float(data.get("methane", 0)),
             "co2": float(data.get("co2", 0)),
@@ -160,124 +137,125 @@ def get_risk(sensor_id: str):
             "humidity": float(data.get("humidity", 0))
         }])
 
-        features_scaled = scaler.transform(features)
-        predicted_risk = float(model.predict(features_scaled)[0])
+        scaled = scaler.transform(features)
+        pred = float(model.predict(scaled)[0])
 
-        # Fuzzy mapping
-        if predicted_risk < 0.4:
-            level, score, explosion_risk = "LOW", int(predicted_risk*25), 5
-        elif predicted_risk < 0.7:
-            level, score, explosion_risk = "MEDIUM", int(predicted_risk*50), 25
+        if pred < 0.4:
+            return {"level": "LOW", "score": int(pred*25), "explosion_risk": 5}
+        elif pred < 0.7:
+            return {"level": "MEDIUM", "score": int(pred*50), "explosion_risk": 25}
         else:
-            level, score, explosion_risk = "HIGH", int(predicted_risk*100), 60
+            return {"level": "HIGH", "score": int(pred*100), "explosion_risk": 60}
 
     except Exception as e:
-        logger.warning(f"ML fallback for {sensor_id}: {e}")
+        logger.warning(f"Fallback risk used: {e}")
         methane = float(data.get("methane", 0))
         if methane < 3:
-            level, score, explosion_risk = "LOW", 10, 5
+            return {"level": "LOW", "score": 10, "explosion_risk": 5}
         elif methane < 7:
-            level, score, explosion_risk = "MEDIUM", 50, 25
+            return {"level": "MEDIUM", "score": 50, "explosion_risk": 25}
         else:
-            level, score, explosion_risk = "HIGH", 90, 60
-
-    return {"level": level, "score": score, "explosion_risk": explosion_risk}
-
-def get_forecast(sensor_id: str):
-    history = safe_get(firebase_db.child(f"sensorReadings/history/{sensor_id}")
-                       .order_by_key().limit_to_last(5), {})
-    return [float(v.get("methane", 0)) for v in history.values()] if history else []
-
-def get_metrics(sensor_id: str):
-    return model_metrics or {"RMSE": 0.5, "MAE": 0.3}
-
-def get_alerts(sensor_id: str):
-    risk = get_risk(sensor_id)
-    return [{"type": "METHANE", "level": risk["level"], "score": risk["score"]}]
+            return {"level": "HIGH", "score": 90, "explosion_risk": 60}
 
 def get_chart(sensor_id: str):
-    history = safe_get(firebase_db.child(f"sensorReadings/history/{sensor_id}")
-                       .order_by_key().limit_to_last(20), {})
+    history = safe_get(
+        firebase_db.child(f"sensorReadings/history/{sensor_id}")
+        .order_by_key().limit_to_last(20), {}
+    )
 
     if not history:
         return {"timestamps": [], "methane": [], "co2": []}
 
     return {
-        "timestamps": [v.get("timestamp") for v in history.values()],
-        "methane": [float(v.get("methane", 0)) for v in history.values()],
-        "co2": [float(v.get("co2", 0)) for v in history.values()]
+        "timestamps": [v["timestamp"] for v in history.values()],
+        "methane": [float(v["methane"]) for v in history.values()],
+        "co2": [float(v["co2"]) for v in history.values()]
     }
 
+def get_metrics(sensor_id: str):
+    return model_metrics or {"RMSE": 0.5, "MSE": 0.25, "MAE": 0.3}
+
 # ==============================
-# INSERT SENSOR DATA
+# WEBSOCKET
+# ==============================
+clients: List[WebSocket] = []
+
+@app.websocket("/ws")
+async def websocket(ws: WebSocket):
+    await ws.accept()
+    clients.append(ws)
+    try:
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        clients.remove(ws)
+
+async def broadcast(data: dict):
+    for client in clients:
+        try:
+            await client.send_json(data)
+        except:
+            pass
+
+# ==============================
+# INSERT SENSOR
 # ==============================
 @app.post("/api/sensor/insert")
-async def api_sensor_insert(request: Request):
+async def insert_sensor(data: SensorInput):
     try:
-        payload = await request.json()
-        sensor_id = payload.get("sensor_id")
-        if not sensor_id:
-            return JSONResponse({"status": "error", "message": "sensor_id required"}, status_code=400)
-
-        # Add timestamp
+        payload = data.dict()
+        sensor_id = payload["sensor_id"]
         payload["timestamp"] = current_ph_time()
 
-        # Save latest
+        # Save
         firebase_db.child(f"sensorReadings/latest/{sensor_id}").set(payload)
+        firebase_db.child(
+            f"sensorReadings/history/{sensor_id}/{payload['timestamp']}"
+        ).set(payload)
 
-        # Save history
-        firebase_db.child(f"sensorReadings/history/{sensor_id}/{payload['timestamp']}").set(payload)
+        # Broadcast realtime
+        await broadcast(payload)
 
-        return {"status": "success", "message": "Sensor data inserted", "timestamp": payload["timestamp"]}
+        return {"status": "success", "data": payload}
 
     except Exception as e:
-        logger.error(f"Insert failed: {e}")
-        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+        logger.error(f"Insert error: {e}")
+        return {"status": "error", "message": str(e)}
 
 # ==============================
 # API ENDPOINTS
 # ==============================
-@app.get("/api/sensors", response_model=List[str])
-def api_sensors():
+@app.get("/api/sensors")
+def sensors():
     return list_sensors()
 
 @app.get("/api/sensor/summary/{sensor_id}")
-def api_summary(sensor_id: str):
+def summary(sensor_id: str):
     return get_summary(sensor_id)
 
 @app.get("/api/fuzzy/{sensor_id}")
-def api_fuzzy(sensor_id: str):
+def fuzzy(sensor_id: str):
     return {"risk": get_risk(sensor_id)}
 
-@app.get("/api/forecast/{sensor_id}")
-def api_forecast(sensor_id: str):
-    return {"forecast": get_forecast(sensor_id)}
-
 @app.get("/api/model/metrics/{sensor_id}")
-def api_metrics(sensor_id: str):
+def metrics(sensor_id: str):
     return get_metrics(sensor_id)
 
-@app.get("/api/sensor/alerts/{sensor_id}")
-def api_alerts(sensor_id: str):
-    return {"alerts": get_alerts(sensor_id)}
-
 @app.get("/api/visualization/chart/{sensor_id}")
-def api_chart(sensor_id: str):
+def chart(sensor_id: str):
     return get_chart(sensor_id)
 
 # ==============================
-# WEBSOCKET FOR REAL-TIME
+# ROOT
 # ==============================
-connected_clients: List[WebSocket] = []
+@app.get("/")
+def root():
+    return {"status": "API running 🚀"}
 
-@app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
-    await ws.accept()
-    connected_clients.append(ws)
-    try:
-        while True:
-            data = await ws.receive_text()
-            # Optional: Echo or send live updates
-            await ws.send_text(f"Server received: {data}")
-    except WebSocketDisconnect:
-        connected_clients.remove(ws)
+# ==============================
+# RENDER PORT FIX
+# ==============================
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
