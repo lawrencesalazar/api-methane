@@ -113,14 +113,12 @@ class SimpleTTLCache:
             if datetime.now().timestamp() - self.timestamps[key] < self.ttl:
                 return self.cache[key]
             else:
-                # Remove expired item
                 del self.cache[key]
                 del self.timestamps[key]
         return None
     
     def set(self, key, value):
         """Set item in cache"""
-        # Remove oldest if cache is full
         if len(self.cache) >= self.max_size:
             oldest_key = min(self.timestamps, key=self.timestamps.get)
             del self.cache[oldest_key]
@@ -129,11 +127,7 @@ class SimpleTTLCache:
         self.cache[key] = value
         self.timestamps[key] = datetime.now().timestamp()
     
-    def __contains__(self, key):
-        return self.get(key) is not None
-    
     def clear(self):
-        """Clear all cache"""
         self.cache.clear()
         self.timestamps.clear()
 
@@ -335,23 +329,19 @@ class MethanePredictor:
     def calculate_metrics(self, y_true, y_pred):
         """Calculate regression metrics"""
         try:
-            # Convert to numpy arrays if needed
             y_true = np.array(y_true)
             y_pred = np.array(y_pred)
             
-            # Calculate metrics
             self.mse = float(mean_squared_error(y_true, y_pred))
             self.rmse = float(np.sqrt(self.mse))
             self.mae = float(mean_absolute_error(y_true, y_pred))
             self.r2 = float(r2_score(y_true, y_pred))
             
-            # Ensure metrics are reasonable
-            if self.rmse < 0.01:
-                self.rmse = 0.01  # Minimum reasonable value
+            # Cap R2 at 0.99 to avoid perfect claims
             if self.r2 > 0.99:
-                self.r2 = min(0.99, self.r2)  # Cap at 0.99 to avoid perfect score claims
+                self.r2 = 0.99
             
-            logger.info(f"Calculated metrics - RMSE: {self.rmse}, R2: {self.r2}")
+            logger.info(f"Calculated metrics - RMSE: {self.rmse:.2f}, R2: {self.r2:.3f}")
             
             return {
                 'RMSE': round(self.rmse, 2),
@@ -377,8 +367,7 @@ class MethanePredictor:
             features = self.prepare_features(window)
             if features is not None:
                 X_list.append(features.flatten())
-                # Predict the next value AFTER the window
-                y_list.append(data[i+1]['methane'] if i+1 < len(data) else data[i]['methane'])
+                y_list.append(data[i+1]['methane'])
         
         if len(X_list) < 5:
             logger.warning(f"Insufficient training samples: {len(X_list)}")
@@ -387,9 +376,6 @@ class MethanePredictor:
         try:
             X = np.array(X_list)
             y = np.array(y_list)
-            
-            # Add small noise to prevent perfect fitting
-            y = y + np.random.normal(0, 0.01, size=len(y))
             
             # Split into train and validation sets
             split_idx = int(len(X) * 0.8)
@@ -427,7 +413,7 @@ class MethanePredictor:
             self.last_training_time = datetime.now()
             self.training_samples = len(X_list)
             
-            logger.info(f"Model trained - RMSE: {self.rmse}, R2: {self.r2}, R2%: {self.r2*100:.1f}%, Samples: {self.training_samples}")
+            logger.info(f"Model trained - RMSE: {self.rmse}, R2: {self.r2}, Samples: {self.training_samples}")
             return True
             
         except Exception as e:
@@ -436,7 +422,7 @@ class MethanePredictor:
     
     def predict_next_values(self, current_data, hours_ahead=5):
         """Predict methane values for next N hours"""
-        if len(self.history_buffer) < 10:
+        if len(self.history_buffer) < 10 or not self.is_trained:
             return self._simple_prediction(current_data, hours_ahead)
         
         try:
@@ -448,7 +434,6 @@ class MethanePredictor:
             
             predictions = []
             confidence_intervals = []
-            
             current_methane = current_data.get('methane', 0)
             
             # Calculate trend
@@ -461,11 +446,8 @@ class MethanePredictor:
                 trend = 0
             
             for i in range(hours_ahead):
-                if self.is_trained:
-                    features_poly = self.poly_features.transform(features)
-                    base_pred = self.model.predict(features_poly)[0]
-                else:
-                    base_pred = current_methane
+                features_poly = self.poly_features.transform(features)
+                base_pred = self.model.predict(features_poly)[0]
                 
                 decay = 1.0 - (i * 0.05)
                 
@@ -567,39 +549,26 @@ class PredictorCache:
     """In-memory cache for predictors (optimized for Render free tier)"""
     
     def __init__(self, ttl_seconds=3600, max_size=100):
-        self.predictors = {}  # sensor_id -> predictor instance
+        self.predictors = {}
         self.cache = SimpleTTLCache(ttl_seconds=ttl_seconds, max_size=max_size)
-        self.ttl = ttl_seconds
         
     def get_predictor(self, sensor_id: str) -> MethanePredictor:
-        """Get or create predictor for sensor"""
         if sensor_id not in self.predictors:
             self.predictors[sensor_id] = MethanePredictor()
             logger.info(f"Created new predictor for {sensor_id}")
         return self.predictors[sensor_id]
     
     def get_cached_prediction(self, sensor_id: str, hours: int) -> dict:
-        """Get cached prediction if available"""
-        cache_key = f"{sensor_id}_{hours}"
-        return self.cache.get(cache_key)
+        return self.cache.get(f"{sensor_id}_{hours}")
     
     def set_cached_prediction(self, sensor_id: str, hours: int, response: dict):
-        """Cache prediction response"""
-        cache_key = f"{sensor_id}_{hours}"
-        self.cache.set(cache_key, response)
+        self.cache.set(f"{sensor_id}_{hours}", response)
         
     def train_if_needed(self, sensor_id: str, history_data: list) -> bool:
-        """Train only if not trained or significant new data"""
         predictor = self.get_predictor(sensor_id)
         
         if not predictor.is_trained or len(history_data) > predictor.training_samples + 10:
-            result = predictor.train_model(history_data)
-            if result:
-                logger.info(f"Trained model for {sensor_id} with {len(history_data)} samples")
-                global model_metrics
-                model_metrics = predictor.get_metrics()
-                save_metrics()
-            return result
+            return predictor.train_model(history_data)
         return False
 
 # Initialize cache
@@ -701,11 +670,9 @@ async def insert_sensor(data: SensorInput):
         timestamp_key = current_ph_time()
         payload["timestamp"] = readable_time()
         
-        # Calculate fuzzy risk
         risk = get_risk(payload)
         payload["risk"] = risk
         
-        # Get predictor and add reading
         predictor = predictor_cache.get_predictor(sensor_id)
         predictor.add_reading(
             payload["methane"],
@@ -720,12 +687,10 @@ async def insert_sensor(data: SensorInput):
         if len(history_list) >= 10:
             predictor_cache.train_if_needed(sensor_id, history_list)
 
-        # Save to Firebase
         if firebase_db:
             firebase_db.child(f"sensorReadings/latest/{sensor_id}").set(payload)
             firebase_db.child(f"sensorReadings/history/{sensor_id}/{timestamp_key}").set(payload)
 
-        # Broadcast to WebSocket clients
         await broadcast(payload)
 
         return {"status": "success", "data": payload}
@@ -765,43 +730,86 @@ def fuzzy(sensor_id: str):
         logger.error(f"Fuzzy endpoint error: {e}")
         return {"risk": {"level": "ERROR", "score": 0, "explosion_risk": 0}, "error": str(e)}
 
+# ==============================
+# FIXED: METRICS ENDPOINT WITH ON-DEMAND TRAINING
+# ==============================
 @app.get("/api/model/metrics/{sensor_id}")
 def metrics(sensor_id: str):
-    """Get actual ML model metrics calculated from historical data"""
+    """Get actual ML model metrics - trains on-demand if needed"""
     try:
+        # Get historical data
+        history_list = get_history_list(sensor_id, 100)
+        
+        if len(history_list) < 10:
+            return {
+                "error": "Insufficient data for training",
+                "model_trained": False,
+                "data_points_available": len(history_list),
+                "data_points_needed": 10,
+                "message": f"Need {10 - len(history_list)} more data points. Current: {len(history_list)}"
+            }
+        
+        # Get predictor
         predictor = predictor_cache.get_predictor(sensor_id)
         
-        if predictor.is_trained:
+        # Add historical data if needed
+        if len(predictor.history_buffer) < len(history_list):
+            predictor.history_buffer.clear()
+            for reading in history_list:
+                predictor.add_reading(
+                    reading['methane'],
+                    reading['co2'],
+                    reading['temperature'],
+                    reading['humidity'],
+                    reading['timestamp']
+                )
+        
+        # FORCE TRAINING to get fresh metrics
+        training_result = predictor.train_model(history_list)
+        
+        if training_result and predictor.is_trained:
             metrics_data = predictor.get_metrics()
             
             # Add interpretation
-            if metrics_data['R2'] and metrics_data['R2'] > 0.7:
+            r2 = metrics_data.get('R2')
+            if r2 is None:
+                interpretation = "Training completed but metrics unavailable. Check data quality."
+            elif r2 > 0.7:
                 interpretation = "Excellent model performance. Predictions are reliable."
-            elif metrics_data['R2'] and metrics_data['R2'] > 0.5:
+            elif r2 > 0.5:
                 interpretation = "Good model performance. Predictions are reasonably accurate."
-            elif metrics_data['R2'] and metrics_data['R2'] > 0.3:
+            elif r2 > 0.3:
                 interpretation = "Fair model performance. Predictions should be used with caution."
             else:
-                interpretation = "Poor model performance. More data needed for reliable predictions."
+                interpretation = f"Poor model performance (R²={r2}). More varied data needed."
             
             return {
-                **metrics_data,
+                "RMSE": metrics_data.get('RMSE'),
+                "MSE": metrics_data.get('MSE'),
+                "MAE": metrics_data.get('MAE'),
+                "R2": metrics_data.get('R2'),
+                "model_trained": True,
+                "training_samples": metrics_data.get('training_samples', len(history_list)),
+                "last_training": metrics_data.get('last_training'),
+                "confidence_score": metrics_data.get('confidence_score', 0),
                 "interpretation": interpretation,
                 "sensor_id": sensor_id
             }
         else:
-            history_list = get_history_list(sensor_id, 100)
             return {
-                "error": "Model not trained yet",
+                "error": "Model training failed",
                 "model_trained": False,
                 "data_points_available": len(history_list),
-                "data_points_needed": 10,
-                "message": f"Need {max(0, 10 - len(history_list))} more data points for reliable metrics"
+                "message": "Unable to train model. Check if methane values have sufficient variation."
             }
             
     except Exception as e:
         logger.error(f"Metrics error: {e}")
-        return {"error": str(e), "model_trained": False}
+        return {
+            "error": str(e),
+            "model_trained": False,
+            "message": f"Error calculating metrics: {str(e)}"
+        }
 
 @app.get("/api/visualization/chart/{sensor_id}")
 def chart(sensor_id: str, limit: int = 20, offset: int = 0):
@@ -848,7 +856,6 @@ def predict(sensor_id: str, hours: int = 5):
         # Check cache first
         cached_result = predictor_cache.get_cached_prediction(sensor_id, hours)
         if cached_result:
-            logger.info(f"Returning cached prediction for {sensor_id}")
             cached_result["cache_hit"] = True
             return cached_result
         
@@ -861,14 +868,13 @@ def predict(sensor_id: str, hours: int = 5):
                 "predictions": [],
                 "needs_more_data": True,
                 "required_data": 10,
-                "current_data": len(history_list),
-                "message": f"Need {10 - len(history_list)} more readings for reliable prediction"
+                "current_data": len(history_list)
             }
         
-        # Get predictor and add historical readings
+        # Get predictor
         predictor = predictor_cache.get_predictor(sensor_id)
         
-        # Add readings if predictor is empty
+        # Add readings if needed
         if len(predictor.history_buffer) == 0:
             for reading in history_list[-50:]:
                 predictor.add_reading(
@@ -883,53 +889,25 @@ def predict(sensor_id: str, hours: int = 5):
         if len(history_list) >= 10:
             predictor_cache.train_if_needed(sensor_id, history_list)
         
-        # Get current/latest reading
+        # Get current reading
         latest = get_summary(sensor_id)
         current_methane = float(latest.get('methane', 0)) if latest else 0
         current_co2 = float(latest.get('co2', 0)) if latest else 0
         current_temp = float(latest.get('temperature', 25)) if latest else 25
         current_humidity = float(latest.get('humidity', 50)) if latest else 50
         
-        # Limit hours
         hours = max(1, min(12, hours))
         
-        # Get predictions
         predictions_result = predictor.predict_next_values(
-            {
-                'methane': current_methane,
-                'co2': current_co2,
-                'temperature': current_temp,
-                'humidity': current_humidity
-            },
+            {'methane': current_methane, 'co2': current_co2,
+             'temperature': current_temp, 'humidity': current_humidity},
             hours_ahead=hours
         )
         
-        # Generate time labels
         now = datetime.now(PH_TZ)
         time_labels = [(now + timedelta(hours=i+1)).strftime("%H:%M") for i in range(hours)]
         
-        # Get current risk
         risk = get_risk(latest) if latest else {"level": "UNKNOWN", "score": 0}
-        
-        # Generate interpretation
-        if predictions_result['predictions']:
-            final_pred = predictions_result['predictions'][-1]
-            change = final_pred - current_methane
-            
-            if risk.get('level') in ["CRITICAL", "HIGH"]:
-                interpretation = f"⚠️ CRITICAL: Methane predicted to {'increase' if change > 0 else 'decrease'} from {current_methane:.0f} to {final_pred:.0f} ppm. Immediate action required."
-            elif risk.get('level') == "MEDIUM":
-                if change > 50:
-                    interpretation = f"⚠️ WARNING: Methane expected to rise significantly to {final_pred:.0f} ppm. Increase monitoring."
-                else:
-                    interpretation = f"📊 Methane predicted to remain around {final_pred:.0f} ppm. Continue monitoring."
-            else:
-                if change > 30:
-                    interpretation = f"📈 Methane predicted to rise to {final_pred:.0f} ppm. Monitor trend closely."
-                else:
-                    interpretation = f"✅ Methane expected to remain stable at approximately {final_pred:.0f} ppm."
-        else:
-            interpretation = "Insufficient data for prediction interpretation."
         
         response = {
             "sensor_id": sensor_id,
@@ -950,13 +928,10 @@ def predict(sensor_id: str, hours: int = 5):
                 "score": risk.get('score', 0),
                 "explosion_risk": risk.get('explosion_risk', 0)
             },
-            "interpretation": interpretation,
             "cache_hit": False
         }
         
-        # Cache the response
         predictor_cache.set_cached_prediction(sensor_id, hours, response)
-        
         return response
         
     except Exception as e:
@@ -991,11 +966,7 @@ def fuzzy_config():
 def root():
     return {
         "status": "API running with Fuzzy Logic + ML (Optimized for Render Free Tier)",
-        "cache_config": {
-            "ttl_seconds": 3600,
-            "max_size": 100,
-            "cache_enabled": True
-        },
+        "cache_config": {"ttl_seconds": 3600, "max_size": 100, "cache_enabled": True},
         "endpoints": [
             "POST /api/sensor/insert",
             "GET /api/sensors",
