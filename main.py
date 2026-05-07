@@ -19,7 +19,6 @@ from collections import deque
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from cachetools import TTLCache
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -94,6 +93,49 @@ def current_ph_time():
 
 def readable_time():
     return datetime.now(PH_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+# ==============================
+# SIMPLE CACHE IMPLEMENTATION (No external dependencies)
+# ==============================
+
+class SimpleTTLCache:
+    """Simple in-memory cache with TTL (no external dependencies)"""
+    
+    def __init__(self, ttl_seconds=3600, max_size=100):
+        self.ttl = ttl_seconds
+        self.max_size = max_size
+        self.cache = {}
+        self.timestamps = {}
+        
+    def get(self, key):
+        """Get item from cache if not expired"""
+        if key in self.cache:
+            if datetime.now().timestamp() - self.timestamps[key] < self.ttl:
+                return self.cache[key]
+            else:
+                # Remove expired item
+                del self.cache[key]
+                del self.timestamps[key]
+        return None
+    
+    def set(self, key, value):
+        """Set item in cache"""
+        # Remove oldest if cache is full
+        if len(self.cache) >= self.max_size:
+            oldest_key = min(self.timestamps, key=self.timestamps.get)
+            del self.cache[oldest_key]
+            del self.timestamps[oldest_key]
+        
+        self.cache[key] = value
+        self.timestamps[key] = datetime.now().timestamp()
+    
+    def __contains__(self, key):
+        return self.get(key) is not None
+    
+    def clear(self):
+        """Clear all cache"""
+        self.cache.clear()
+        self.timestamps.clear()
 
 # ==============================
 # LOAD OR CREATE ML MODEL METRICS
@@ -480,7 +522,7 @@ class PredictorCache:
     
     def __init__(self, ttl_seconds=3600, max_size=100):
         self.predictors = {}  # sensor_id -> predictor instance
-        self.cache = TTLCache(maxsize=max_size, ttl=ttl_seconds)  # Response cache
+        self.cache = SimpleTTLCache(ttl_seconds=ttl_seconds, max_size=max_size)
         self.ttl = ttl_seconds
         
     def get_predictor(self, sensor_id: str) -> MethanePredictor:
@@ -498,7 +540,7 @@ class PredictorCache:
     def set_cached_prediction(self, sensor_id: str, hours: int, response: dict):
         """Cache prediction response"""
         cache_key = f"{sensor_id}_{hours}"
-        self.cache[cache_key] = response
+        self.cache.set(cache_key, response)
         
     def train_if_needed(self, sensor_id: str, history_data: list) -> bool:
         """Train only if not trained or significant new data"""
@@ -508,7 +550,6 @@ class PredictorCache:
             result = predictor.train_model(history_data)
             if result:
                 logger.info(f"Trained model for {sensor_id} with {len(history_data)} samples")
-                # Update global metrics
                 global model_metrics
                 model_metrics = predictor.get_metrics()
                 save_metrics()
