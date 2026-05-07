@@ -129,17 +129,25 @@ def list_sensors() -> List[str]:
 def get_summary(sensor_id: str):
     return safe_get(firebase_db.child(f"sensorReadings/latest/{sensor_id}"), {})
 
-def get_risk(sensor_data):
+def get_risk(sensor_input):
     try:
-        methane = float(sensor_data.get("methane", 0))
-        co2 = float(sensor_data.get("co2", 0))
-        temperature = float(sensor_data.get("temperature", 0))
-        humidity = float(sensor_data.get("humidity", 0))
+        # =========================
+        # IF STRING SENSOR ID
+        # =========================
+        if isinstance(sensor_input, str):
+            data = get_summary(sensor_input)
+        else:
+            data = sensor_input
+
+        methane = float(data.get("methane", 0))
+        co2 = float(data.get("co2", 0))
+        temperature = float(data.get("temperature", 0))
+        humidity = float(data.get("humidity", 0))
 
         score = 0
 
         # =========================
-        # METHANE WEIGHT
+        # METHANE
         # =========================
         if methane >= 300:
             score += 50
@@ -151,7 +159,7 @@ def get_risk(sensor_data):
             score += 10
 
         # =========================
-        # CO2 WEIGHT
+        # CO2
         # =========================
         if co2 >= 1000:
             score += 25
@@ -161,7 +169,7 @@ def get_risk(sensor_data):
             score += 10
 
         # =========================
-        # TEMPERATURE WEIGHT
+        # TEMPERATURE
         # =========================
         if temperature >= 45:
             score += 20
@@ -169,7 +177,7 @@ def get_risk(sensor_data):
             score += 10
 
         # =========================
-        # HUMIDITY WEIGHT
+        # HUMIDITY
         # =========================
         if humidity >= 85:
             score += 10
@@ -177,7 +185,7 @@ def get_risk(sensor_data):
             score += 5
 
         # =========================
-        # FINAL CLASSIFICATION
+        # FINAL LEVEL
         # =========================
         if score >= 70:
             level = "HIGH"
@@ -203,7 +211,6 @@ def get_risk(sensor_data):
             "score": 0,
             "explosion_risk": 0
         }
-
 
 def get_chart(sensor_id: str):
     history = safe_get(
