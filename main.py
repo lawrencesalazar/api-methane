@@ -129,36 +129,81 @@ def list_sensors() -> List[str]:
 def get_summary(sensor_id: str):
     return safe_get(firebase_db.child(f"sensorReadings/latest/{sensor_id}"), {})
 
-def get_risk(sensor_id: str):
-    data = get_summary(sensor_id)
-
+def get_risk(sensor_data):
     try:
-        features = pd.DataFrame([{
-            "methane": float(data.get("methane", 0)),
-            "co2": float(data.get("co2", 0)),
-            "temperature": float(data.get("temperature", 0)),
-            "humidity": float(data.get("humidity", 0))
-        }])
+        methane = float(sensor_data.get("methane", 0))
+        co2 = float(sensor_data.get("co2", 0))
+        temperature = float(sensor_data.get("temperature", 0))
+        humidity = float(sensor_data.get("humidity", 0))
 
-        scaled = scaler.transform(features)
-        pred = float(model.predict(scaled)[0])
+        score = 0
 
-        if pred < 0.4:
-            return {"level": "LOW", "score": int(pred*25), "explosion_risk": 5}
-        elif pred < 0.7:
-            return {"level": "MEDIUM", "score": int(pred*50), "explosion_risk": 25}
+        # =========================
+        # METHANE WEIGHT
+        # =========================
+        if methane >= 300:
+            score += 50
+        elif methane >= 200:
+            score += 40
+        elif methane >= 100:
+            score += 25
+        elif methane >= 50:
+            score += 10
+
+        # =========================
+        # CO2 WEIGHT
+        # =========================
+        if co2 >= 1000:
+            score += 25
+        elif co2 >= 500:
+            score += 15
+        elif co2 >= 300:
+            score += 10
+
+        # =========================
+        # TEMPERATURE WEIGHT
+        # =========================
+        if temperature >= 45:
+            score += 20
+        elif temperature >= 35:
+            score += 10
+
+        # =========================
+        # HUMIDITY WEIGHT
+        # =========================
+        if humidity >= 85:
+            score += 10
+        elif humidity >= 70:
+            score += 5
+
+        # =========================
+        # FINAL CLASSIFICATION
+        # =========================
+        if score >= 70:
+            level = "HIGH"
+            explosion_risk = 80
+        elif score >= 40:
+            level = "MEDIUM"
+            explosion_risk = 40
         else:
-            return {"level": "HIGH", "score": int(pred*100), "explosion_risk": 60}
+            level = "LOW"
+            explosion_risk = 10
+
+        return {
+            "level": level,
+            "score": score,
+            "explosion_risk": explosion_risk
+        }
 
     except Exception as e:
-        logger.warning(f"Fallback risk used: {e}")
-        methane = float(data.get("methane", 0))
-        if methane < 3:
-            return {"level": "LOW", "score": 10, "explosion_risk": 5}
-        elif methane < 7:
-            return {"level": "MEDIUM", "score": 50, "explosion_risk": 25}
-        else:
-            return {"level": "HIGH", "score": 90, "explosion_risk": 60}
+        logger.error(f"Risk calculation error: {e}")
+
+        return {
+            "level": "UNKNOWN",
+            "score": 0,
+            "explosion_risk": 0
+        }
+
 
 def get_chart(sensor_id: str):
     history = safe_get(
@@ -237,7 +282,8 @@ async def insert_sensor(data: SensorInput):
         timestamp_key = current_ph_time()
         payload["timestamp"] = readable_time()   # human readable
         # ✅ compute fuzzy
-        risk = get_risk(sensor_id)
+        # risk = get_risk(sensor_id)
+        risk = get_risk(payload)
         payload["risk"] = risk
 
         # save
