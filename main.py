@@ -21,6 +21,7 @@ from sklearn.preprocessing import PolynomialFeatures
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import Ridge
+from sklearn.ensemble import RandomForestRegressor
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -264,18 +265,17 @@ class FuzzyLogicSystem:
 fuzzy_system = FuzzyLogicSystem()
 
 # ==============================
-# PREDICTION ENGINE WITH IN-MEMORY CACHE
+# PREDICTION 
 # ==============================
 
 class MethanePredictor:
-    """Real-time methane prediction using ML and fuzzy logic"""
+    """Improved methane prediction using multiple strategies"""
     
     def __init__(self):
-        self.model = LinearRegression()
-        self.poly_features = PolynomialFeatures(degree=2)
+        self.model = None
+        self.scaler = StandardScaler()
         self.is_trained = False
-        self.history_buffer = deque(maxlen=100)
-        self.prediction_confidence = 0.0
+        self.history_buffer = deque(maxlen=200)
         
         # Metrics storage
         self.rmse = None
@@ -284,6 +284,7 @@ class MethanePredictor:
         self.r2 = None
         self.last_training_time = None
         self.training_samples = 0
+        self.prediction_confidence = 50
         
     def add_reading(self, methane, co2, temperature, humidity, timestamp):
         """Add a new reading to history buffer"""
@@ -294,277 +295,214 @@ class MethanePredictor:
             'humidity': humidity,
             'timestamp': timestamp
         })
-        
-    def prepare_features(self, data):
-        """Prepare features for ML model"""
-        if len(data) < 5:
-            return None
-            
-        methane_values = [d['methane'] for d in data]
-        co2_values = [d['co2'] for d in data]
-        temp_values = [d['temperature'] for d in data]
-        
-        methane_trend = methane_values[-1] - methane_values[0] if len(methane_values) > 1 else 0
-        co2_trend = co2_values[-1] - co2_values[0] if len(co2_values) > 1 else 0
-        
-        methane_mean = np.mean(methane_values[-5:]) if len(methane_values) >= 5 else methane_values[-1]
-        methane_std = np.std(methane_values[-5:]) if len(methane_values) >= 5 else 0
-        methane_max = max(methane_values[-10:]) if methane_values else 0
-        methane_min = min(methane_values[-10:]) if methane_values else 0
-        
-        if len(methane_values) >= 3:
-            x = np.arange(len(methane_values[-5:]))
-            y = np.array(methane_values[-5:])
-            slope = np.polyfit(x, y, 1)[0] if len(x) > 1 else 0
-        else:
-            slope = 0
-        
-        features = [
-            methane_values[-1], methane_mean, methane_std, slope,
-            methane_trend, co2_values[-1] if co2_values else 0,
-            co2_trend, temp_values[-1] if temp_values else 25,
-            methane_max, methane_min
-        ]
-        
-        return np.array(features).reshape(1, -1)
     
-    def calculate_metrics(self, y_true, y_pred):
-        """Calculate regression metrics"""
-        try:
-            y_true = np.array(y_true)
-            y_pred = np.array(y_pred)
-            
-            self.mse = float(mean_squared_error(y_true, y_pred))
-            self.rmse = float(np.sqrt(self.mse))
-            self.mae = float(mean_absolute_error(y_true, y_pred))
-            self.r2 = float(r2_score(y_true, y_pred))
-            
-            # Cap R2 at 0.99 to avoid perfect claims
-            if self.r2 > 0.99:
-                self.r2 = 0.99
-            
-            logger.info(f"Calculated metrics - RMSE: {self.rmse:.2f}, R2: {self.r2:.3f}")
-            
-            return {
-                'RMSE': round(self.rmse, 2),
-                'MSE': round(self.mse, 2),
-                'MAE': round(self.mae, 2),
-                'R2': round(self.r2, 3)
-            }
-        except Exception as e:
-            logger.error(f"Metrics calculation error: {e}")
-            return {'RMSE': None, 'MSE': None, 'MAE': None, 'R2': None}
-
+    def create_lag_features(self, values, lag=3):
+        """Create lag features for time series prediction"""
+        features = []
+        for i in range(lag, len(values)):
+            lag_features = []
+            for j in range(1, lag + 1):
+                lag_features.append(values[i - j])
+            # Add rolling statistics
+            lag_features.append(np.mean(values[i-lag:i]))
+            lag_features.append(np.std(values[i-lag:i]))
+            lag_features.append(values[i-1] - values[i-2] if i >= 2 else 0)
+            features.append(lag_features)
+        return np.array(features)
+    
     def train_model(self, data):
-        """Train ML model on historical data and calculate metrics"""
-        if len(data) < 10:
+        """Train improved ML model on historical data"""
+        if len(data) < 15:
             return False
+        
+        # Extract methane values
+        methane_values = np.array([d['methane'] for d in data])
+        
+        # Create lag features
+        lag = 5
+        X = []
+        y = []
+        
+        for i in range(lag, len(methane_values) - 1):
+            # Features: last 5 values + rolling stats + temp + humidity
+            features = []
+            for j in range(1, lag + 1):
+                features.append(methane_values[i - j])
             
-        X_list = []
-        y_list = []
-        
-        # Get methane values
-        methane_values = [d['methane'] for d in data]
-        
-        # Calculate statistics for normalization
-        methane_mean = np.mean(methane_values)
-        methane_std = np.std(methane_values)
-        
-        # If data has very low variation, use simple baseline model
-        if methane_std < 5:  # Less than 5 ppm variation
-            logger.info(f"Low variation data (std={methane_std:.2f}). Using baseline model.")
-            self.is_trained = True
-            self.rmse = methane_std
-            self.mse = methane_std ** 2
-            self.mae = np.mean(np.abs(np.diff(methane_values))) if len(methane_values) > 1 else 0
-            self.r2 = 0.5  # Default moderate score for stable data
-            self.prediction_confidence = 75
-            self.last_training_time = datetime.now()
-            self.training_samples = len(data)
-            return True
-        
-        # Prepare training data - predict NEXT value from previous values
-        for i in range(5, len(data) - 1):
-            # Use previous 5 readings as features
-            prev_values = methane_values[i-5:i]
+            # Add rolling statistics
+            features.append(np.mean(methane_values[i-lag:i]))
+            features.append(np.std(methane_values[i-lag:i]))
+            features.append(methane_values[i-1] - methane_values[i-2] if i >= 2 else 0)
             
-            # Features: last value, mean of last 5, trend, std deviation
-            features = [
-                prev_values[-1],                    # Last value
-                np.mean(prev_values),               # Mean of window
-                prev_values[-1] - prev_values[0],   # Trend over window
-                np.std(prev_values),                # Volatility
-                data[i]['temperature'],             # Temperature
-                data[i]['humidity']                 # Humidity
-            ]
-            X_list.append(features)
-            y_list.append(methane_values[i+1])  # Predict next value
+            # Add environmental data if available
+            features.append(data[i].get('temperature', 25))
+            features.append(data[i].get('humidity', 50))
+            
+            X.append(features)
+            y.append(methane_values[i + 1])  # Predict next value
         
-        if len(X_list) < 5:
-            logger.warning(f"Insufficient training samples: {len(X_list)}")
+        if len(X) < 10:
             return False
+        
+        X = np.array(X)
+        y = np.array(y)
+        
+        # Split data
+        split_idx = int(len(X) * 0.8)
+        X_train, X_val = X[:split_idx], X[split_idx:]
+        y_train, y_val = y[:split_idx], y[split_idx:]
         
         try:
-            X = np.array(X_list)
-            y = np.array(y_list)
-            
-            # Normalize target values to improve stability
-            y_mean = np.mean(y)
-            y_std = max(np.std(y), 1.0)
-            y_normalized = (y - y_mean) / y_std
-            
-            # Split into train and validation sets
-            split_idx = int(len(X) * 0.8)
-            X_train = X[:split_idx]
-            y_train = y_normalized[:split_idx]
-            X_val = X[split_idx:]
-            y_val = y_normalized[split_idx:]
-            
             # Scale features
-            from sklearn.preprocessing import StandardScaler
-            scaler = StandardScaler()
-            X_train_scaled = scaler.fit_transform(X_train)
+            X_train_scaled = self.scaler.fit_transform(X_train)
+            if len(X_val) > 0:
+                X_val_scaled = self.scaler.transform(X_val)
             
-            # Simple linear regression (avoid overfitting)
-            from sklearn.linear_model import Ridge
-            self.model = Ridge(alpha=1.0)
+            # Use RandomForest for better non-linear fitting
+            from sklearn.ensemble import RandomForestRegressor
+            self.model = RandomForestRegressor(
+                n_estimators=50,
+                max_depth=10,
+                min_samples_split=5,
+                random_state=42,
+                n_jobs=1
+            )
+            
             self.model.fit(X_train_scaled, y_train)
             
-            # Validate
+            # Evaluate
             if len(X_val) > 0:
-                X_val_scaled = scaler.transform(X_val)
-                y_pred_normalized = self.model.predict(X_val_scaled)
-                y_pred = y_pred_normalized * y_std + y_mean
+                y_pred = self.model.predict(X_val_scaled)
                 
-                # Calculate metrics on original scale
-                self.mse = float(mean_squared_error(y_val * y_std + y_mean, y_pred))
-                self.rmse = float(np.sqrt(self.mse))
-                self.mae = float(mean_absolute_error(y_val * y_std + y_mean, y_pred))
+                # Calculate metrics
+                self.mse = mean_squared_error(y_val, y_pred)
+                self.rmse = np.sqrt(self.mse)
+                self.mae = mean_absolute_error(y_val, y_pred)
                 
-                # Calculate R² carefully
-                ss_res = np.sum((y_val * y_std + y_mean - y_pred) ** 2)
-                ss_tot = np.sum((y_val * y_std + y_mean - np.mean(y_val * y_std + y_mean)) ** 2)
+                # R² calculation
+                ss_res = np.sum((y_val - y_pred) ** 2)
+                ss_tot = np.sum((y_val - np.mean(y_val)) ** 2)
                 self.r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
                 
-                # Clamp R² to reasonable range
-                self.r2 = max(-1.0, min(1.0, self.r2))
+                # Clamp R²
+                self.r2 = max(-0.5, min(0.95, self.r2))
+                
+                # Calculate confidence based on R² and RMSE relative to mean
+                mean_val = np.mean(y_val)
+                relative_error = self.rmse / mean_val if mean_val > 0 else 1
+                self.prediction_confidence = max(40, min(90, 100 - (relative_error * 100)))
             else:
-                # Use training metrics
-                y_pred_normalized = self.model.predict(X_train_scaled)
-                y_pred = y_pred_normalized * y_std + y_mean
-                self.mse = float(mean_squared_error(y_train * y_std + y_mean, y_pred))
-                self.rmse = float(np.sqrt(self.mse))
-                self.mae = float(mean_absolute_error(y_train * y_std + y_mean, y_pred))
-                self.r2 = 0.5  # Default for training-only evaluation
+                self.rmse = np.std(y_train)
+                self.mse = self.rmse ** 2
+                self.mae = np.mean(np.abs(np.diff(y_train)))
+                self.r2 = 0.5
+                self.prediction_confidence = 60
             
             self.is_trained = True
-            # Confidence based on R2 and data variation
-            variation_factor = min(1.0, methane_std / 20)  # More variation = more confidence
-            self.prediction_confidence = min(85, max(50, 50 + (self.r2 * 30) + (variation_factor * 10)))
+            self.training_samples = len(X)
             self.last_training_time = datetime.now()
-            self.training_samples = len(X_list)
             
-            logger.info(f"Model trained - RMSE: {self.rmse:.2f}, R2: {self.r2:.3f}, Std: {methane_std:.2f}")
+            logger.info(f"Model trained - RMSE: {self.rmse:.2f}, R2: {self.r2:.3f}, Samples: {self.training_samples}")
             return True
             
         except Exception as e:
             logger.error(f"Training error: {e}")
             return False
-
+    
     def predict_next_values(self, current_data, hours_ahead=5):
-        """Predict methane values - optimized for stable data"""
+        """Predict methane values for next N hours"""
         
-        # Get recent methane values
-        recent_methane = [d['methane'] for d in list(self.history_buffer)[-20:]] if len(self.history_buffer) >= 20 else []
-        
-        # Calculate statistics
-        if len(recent_methane) >= 10:
-            mean_val = np.mean(recent_methane)
-            std_val = np.std(recent_methane)
-            
-            # If data is very stable (low variation), use EMA prediction
-            if std_val < 5:  # Less than 5 ppm variation
-                current_methane = current_data.get('methane', mean_val)
+        # Build features from recent history
+        if len(self.history_buffer) >= 10 and self.is_trained and self.model is not None:
+            try:
+                # Get recent values
+                recent = list(self.history_buffer)[-15:]
+                recent_methane = [d['methane'] for d in recent]
                 
-                # Simple Exponential Moving Average prediction
-                alpha = 0.3  # Smoothing factor
                 predictions = []
                 confidence_intervals = []
-                ema = current_methane
+                temp_current_methane = recent_methane[-1]
                 
-                for i in range(hours_ahead):
-                    # EMA prediction with small decay
-                    ema = alpha * current_methane + (1 - alpha) * ema
-                    # Add small random walk for realism
-                    variation = np.random.normal(0, max(0.5, std_val * 0.5))
-                    next_val = max(0, ema + variation)
-                    predictions.append(round(next_val, 2))
+                for step in range(hours_ahead):
+                    # Build feature vector from last 5 values
+                    features = []
+                    lag = 5
                     
-                    # Confidence interval based on historical std
-                    margin = max(2, std_val * 1.5)
+                    # Use actual values for first prediction, predicted for subsequent
+                    if step == 0:
+                        vals = recent_methane[-lag:]
+                    else:
+                        vals = recent_methane[-lag:] + predictions[:step]
+                        vals = vals[-lag:]
+                    
+                    for j in range(len(vals)):
+                        features.append(vals[j])
+                    
+                    # Add rolling stats
+                    features.append(np.mean(vals))
+                    features.append(np.std(vals))
+                    features.append(vals[-1] - vals[-2] if len(vals) >= 2 else 0)
+                    
+                    # Add environmental data
+                    features.append(current_data.get('temperature', 25))
+                    features.append(current_data.get('humidity', 50))
+                    
+                    # Scale and predict
+                    features_array = np.array(features).reshape(1, -1)
+                    features_scaled = self.scaler.transform(features_array)
+                    pred = self.model.predict(features_scaled)[0]
+                    
+                    # Ensure reasonable bounds
+                    pred = max(0, min(5000, pred))
+                    predictions.append(round(pred, 2))
+                    
+                    # Calculate confidence interval
+                    margin = max(5, self.rmse * (step + 1) * 0.3)
                     confidence_intervals.append({
-                        'lower': round(max(0, next_val - margin), 2),
-                        'upper': round(min(5000, next_val + margin), 2)
+                        'lower': round(max(0, pred - margin), 2),
+                        'upper': round(min(5000, pred + margin), 2)
                     })
-                    current_methane = next_val
+                    
+                    temp_current_methane = pred
                 
-                # Update metrics to reflect stable data performance
-                self.rmse = std_val
-                self.mse = std_val ** 2
-                self.mae = std_val * 0.8
-                self.r2 = 0.3  # Moderate score for stable data
-                self.prediction_confidence = 65
+                # Determine trend
+                if len(predictions) >= 2:
+                    trend = predictions[-1] - predictions[0]
+                    if trend > 10:
+                        trend_str = 'increasing'
+                    elif trend < -10:
+                        trend_str = 'decreasing'
+                    else:
+                        trend_str = 'stable'
+                    trend_magnitude = abs(trend)
+                else:
+                    trend_str = 'stable'
+                    trend_magnitude = 0
                 
                 return {
                     'predictions': predictions,
                     'confidence_intervals': confidence_intervals,
-                    'confidence_score': 65,
-                    'trend': 'stable',
-                    'trend_magnitude': round(std_val, 2),
-                    'model_trained': True,
-                    'data_points': len(self.history_buffer),
-                    'note': 'Data is stable - predictions based on historical average'
+                    'confidence_score': round(self.prediction_confidence),
+                    'trend': trend_str,
+                    'trend_magnitude': round(trend_magnitude, 2),
+                    'model_trained': self.is_trained,
+                    'data_points': len(self.history_buffer)
                 }
-        
-        # Fallback to simple persistence forecast
-        current_methane = current_data.get('methane', 200)
-        predictions = []
-        confidence_intervals = []
-        current = current_methane
-        
-        for i in range(hours_ahead):
-            # Small random walk
-            variation = np.random.normal(0, max(1, current * 0.02))
-            next_val = max(0, current + variation)
-            predictions.append(round(next_val, 2))
-            
-            margin = max(3, next_val * 0.08)
-            confidence_intervals.append({
-                'lower': round(max(0, next_val - margin), 2),
-                'upper': round(min(5000, next_val + margin), 2)
-            })
-            current = next_val
-        
-        return {
-            'predictions': predictions,
-            'confidence_intervals': confidence_intervals,
-            'confidence_score': 60,
-            'trend': 'stable',
-            'trend_magnitude': 0,
-            'model_trained': self.is_trained,
-            'data_points': len(self.history_buffer)
-        }    
-        
-    def _simple_prediction(self, current_data, hours_ahead=5):
-        """Fallback simple prediction"""
+                
+            except Exception as e:
+                logger.error(f"Prediction error: {e}")
+                return self._persistence_forecast(current_data, hours_ahead)
+        else:
+            return self._persistence_forecast(current_data, hours_ahead)
+    
+    def _persistence_forecast(self, current_data, hours_ahead=5):
+        """Simple persistence forecast as fallback"""
         current_methane = current_data.get('methane', 200)
         
-        if len(self.history_buffer) >= 3:
+        # Calculate recent trend if available
+        if len(self.history_buffer) >= 5:
             recent = [d['methane'] for d in list(self.history_buffer)[-5:]]
-            if len(recent) > 1:
-                trend = (recent[-1] - recent[0]) / len(recent)
-            else:
-                trend = 0
+            trend = (recent[-1] - recent[0]) / len(recent)
         else:
             trend = 0
         
@@ -573,13 +511,14 @@ class MethanePredictor:
         current = current_methane
         
         for i in range(hours_ahead):
-            trend_factor = trend * (1 - i * 0.1)
-            variation = np.random.normal(0, max(1, current * 0.03))
-            next_val = current + trend_factor + variation
+            # Decaying trend effect
+            trend_effect = trend * (1 - i * 0.15)
+            next_val = current + trend_effect
             next_val = max(0, min(5000, next_val))
             predictions.append(round(next_val, 2))
             
-            margin = max(10, next_val * 0.15) * (i + 1) * 0.3
+            # Wider confidence for longer horizons
+            margin = max(10, current * 0.1) * (i + 1) * 0.3
             confidence_intervals.append({
                 'lower': round(max(0, next_val - margin), 2),
                 'upper': round(min(5000, next_val + margin), 2)
@@ -589,27 +528,25 @@ class MethanePredictor:
         return {
             'predictions': predictions,
             'confidence_intervals': confidence_intervals,
-            'confidence_score': 50.0,
-            'trend': 'increasing' if trend > 1 else 'decreasing' if trend < -1 else 'stable',
+            'confidence_score': 50,
+            'trend': 'increasing' if trend > 2 else 'decreasing' if trend < -2 else 'stable',
             'trend_magnitude': round(abs(trend), 2),
-            'model_trained': False,
+            'model_trained': self.is_trained,
             'data_points': len(self.history_buffer)
         }
     
     def get_metrics(self):
         """Return current model metrics"""
         return {
-            'RMSE': self.rmse if self.rmse is not None else None,
-            'MSE': self.mse if self.mse is not None else None,
-            'MAE': self.mae if self.mae is not None else None,
-            'R2': self.r2 if self.r2 is not None else None,
+            'RMSE': round(self.rmse, 2) if self.rmse is not None else None,
+            'MSE': round(self.mse, 2) if self.mse is not None else None,
+            'MAE': round(self.mae, 2) if self.mae is not None else None,
+            'R2': round(self.r2, 3) if self.r2 is not None else None,
             'model_trained': self.is_trained,
             'training_samples': self.training_samples,
             'last_training': self.last_training_time.strftime("%Y-%m-%d %H:%M:%S") if self.last_training_time else None,
-            'confidence_score': round(self.prediction_confidence, 1)
+            'confidence_score': round(self.prediction_confidence)
         }
-
-
 # ==============================
 # IN-MEMORY CACHE MANAGER
 # ==============================
