@@ -132,12 +132,12 @@ load_or_create_model()
 # ==============================
 class FuzzyLogicSystem:
     def __init__(self):
-        # Define universes
-        self.methane_universe = np.arange(0, 1001, 1)
-        self.co2_universe = np.arange(0, 5001, 1)
-        self.temp_universe = np.arange(0, 60, 0.1)
-        self.humidity_universe = np.arange(0, 101, 1)
-        self.risk_universe = np.arange(0, 101, 1)
+        # Define universes (expanded for dumpsite ranges)
+        self.methane_universe = np.arange(0, 5001, 1)     # 0-5000 ppm (dumpsite range)
+        self.co2_universe = np.arange(0, 10001, 1)       # 0-10000 ppm
+        self.temp_universe = np.arange(0, 60, 0.1)       # 0-60°C
+        self.humidity_universe = np.arange(0, 101, 1)    # 0-100%
+        self.risk_universe = np.arange(0, 101, 1)        # 0-100% risk
         
         # Define fuzzy variables
         self.methane = ctrl.Antecedent(self.methane_universe, 'methane')
@@ -146,46 +146,59 @@ class FuzzyLogicSystem:
         self.humidity = ctrl.Antecedent(self.humidity_universe, 'humidity')
         self.risk = ctrl.Consequent(self.risk_universe, 'risk')
         
-        # Methane membership functions
-        self.methane['low'] = fuzz.trimf(self.methane_universe, [0, 0, 200])
-        self.methane['medium'] = fuzz.trimf(self.methane_universe, [100, 300, 500])
-        self.methane['high'] = fuzz.trimf(self.methane_universe, [400, 700, 1000])
-        self.methane['dangerous'] = fuzz.trapmf(self.methane_universe, [600, 800, 1000, 1000])
+        # ========== METHANE (Dumpsite-Optimized) ==========
+        # Normal dumpsite baseline is 200-500 ppm
+        self.methane['normal'] = fuzz.trimf(self.methane_universe, [0, 300, 600])
+        self.methane['elevated'] = fuzz.trimf(self.methane_universe, [400, 800, 1200])
+        self.methane['high'] = fuzz.trimf(self.methane_universe, [900, 1500, 2500])
+        self.methane['dangerous'] = fuzz.trapmf(self.methane_universe, [2000, 3000, 5000, 5000])
         
-        # CO2 membership functions
-        self.co2['normal'] = fuzz.trimf(self.co2_universe, [0, 400, 600])
-        self.co2['elevated'] = fuzz.trimf(self.co2_universe, [500, 1000, 1500])
-        self.co2['high'] = fuzz.trimf(self.co2_universe, [1000, 2000, 3000])
-        self.co2['dangerous'] = fuzz.trapmf(self.co2_universe, [2000, 3000, 5000, 5000])
+        # ========== CO2 (Dumpsite-Optimized) ==========
+        self.co2['normal'] = fuzz.trimf(self.co2_universe, [0, 500, 800])
+        self.co2['elevated'] = fuzz.trimf(self.co2_universe, [600, 1200, 2000])
+        self.co2['high'] = fuzz.trimf(self.co2_universe, [1500, 3000, 5000])
+        self.co2['dangerous'] = fuzz.trapmf(self.co2_universe, [4000, 6000, 10000, 10000])
         
-        # Temperature membership functions
-        self.temperature['normal'] = fuzz.trimf(self.temp_universe, [15, 25, 35])
-        self.temperature['warm'] = fuzz.trimf(self.temp_universe, [30, 40, 50])
-        self.temperature['hot'] = fuzz.trapmf(self.temp_universe, [45, 55, 60, 60])
+        # ========== TEMPERATURE (Tropical Dumpsite) ==========
+        self.temperature['normal'] = fuzz.trimf(self.temp_universe, [20, 30, 38])
+        self.temperature['hot'] = fuzz.trimf(self.temp_universe, [35, 45, 55])
+        self.temperature['extreme'] = fuzz.trapmf(self.temp_universe, [50, 60, 60, 60])
         
-        # Humidity membership functions
-        self.humidity['dry'] = fuzz.trimf(self.humidity_universe, [0, 30, 50])
-        self.humidity['normal'] = fuzz.trimf(self.humidity_universe, [40, 60, 80])
-        self.humidity['wet'] = fuzz.trapmf(self.humidity_universe, [70, 85, 100, 100])
+        # ========== HUMIDITY (Tropical Climate) ==========
+        self.humidity['normal'] = fuzz.trimf(self.humidity_universe, [40, 70, 85])
+        self.humidity['wet'] = fuzz.trapmf(self.humidity_universe, [75, 90, 100, 100])
         
-        # Risk membership functions
+        # ========== RISK LEVELS ==========
         self.risk['low'] = fuzz.trimf(self.risk_universe, [0, 0, 30])
-        self.risk['medium'] = fuzz.trimf(self.risk_universe, [20, 50, 70])
-        self.risk['high'] = fuzz.trimf(self.risk_universe, [60, 80, 90])
+        self.risk['medium'] = fuzz.trimf(self.risk_universe, [20, 45, 65])
+        self.risk['high'] = fuzz.trimf(self.risk_universe, [55, 75, 90])
         self.risk['critical'] = fuzz.trapmf(self.risk_universe, [80, 90, 100, 100])
         
-        # Define rules
+        # ========== DUMPSITE-SPECIFIC RULES ==========
         self.rules = [
+            # Dumpsite normal conditions (low risk)
+            ctrl.Rule(self.methane['normal'] & self.co2['normal'], self.risk['low']),
+            ctrl.Rule(self.methane['normal'] & self.temperature['normal'], self.risk['low']),
+            
+            # Elevated methane (still moderate for dumpsite)
+            ctrl.Rule(self.methane['elevated'] & self.co2['normal'], self.risk['low']),
+            ctrl.Rule(self.methane['elevated'] & self.co2['elevated'], self.risk['medium']),
+            
+            # High methane (warning)
+            ctrl.Rule(self.methane['high'] & ~self.co2['dangerous'], self.risk['medium']),
+            ctrl.Rule(self.methane['high'] & self.temperature['hot'], self.risk['high']),
+            
+            # Dangerous methane (real threat)
             ctrl.Rule(self.methane['dangerous'], self.risk['critical']),
-            ctrl.Rule(self.methane['high'] & ~self.co2['normal'], self.risk['high']),
-            ctrl.Rule(self.methane['medium'] & self.co2['elevated'], self.risk['medium']),
-            ctrl.Rule(self.co2['dangerous'] & self.methane['medium'], self.risk['high']),
+            ctrl.Rule(self.methane['dangerous'] & self.co2['dangerous'], self.risk['critical']),
+            
+            # CO2-related (landfill gas indicators)
+            ctrl.Rule(self.co2['dangerous'] & self.methane['elevated'], self.risk['high']),
             ctrl.Rule(self.co2['high'] & self.temperature['hot'], self.risk['medium']),
-            ctrl.Rule(self.temperature['hot'] & self.methane['medium'], self.risk['high']),
-            ctrl.Rule(self.temperature['hot'] & self.humidity['dry'], self.risk['medium']),
-            ctrl.Rule(self.humidity['wet'] & ~self.methane['low'], self.risk['medium']),
-            ctrl.Rule(self.humidity['wet'] & self.temperature['hot'], self.risk['high']),
-            ctrl.Rule(self.methane['low'] & self.co2['normal'], self.risk['low']),
+            
+            # Environmental compounding
+            ctrl.Rule(self.temperature['extreme'] & self.methane['elevated'], self.risk['high']),
+            ctrl.Rule(self.humidity['wet'] & self.methane['high'], self.risk['high']),
         ]
         
         self.risk_ctrl = ctrl.ControlSystem(self.rules)
@@ -193,14 +206,19 @@ class FuzzyLogicSystem:
     
     def calculate_risk(self, methane, co2, temperature, humidity):
         try:
+            # Dumpsite baseline adjustment
+            # Normal dumpsite baseline methane is 300-500 ppm
+            methane_baseline = 350  # Typical dumpsite background
+            adjusted_methane = max(0, methane - methane_baseline + 200)
+            
             # Clamp values to valid ranges
-            methane = max(0, min(1000, methane if methane > 0 else 0))
-            co2 = max(0, min(5000, co2 if co2 > 0 else 0))
-            temperature = max(0, min(60, temperature if temperature > 0 else 25))
-            humidity = max(0, min(100, humidity if humidity > 0 else 50))
+            adjusted_methane = max(0, min(5000, adjusted_methane))
+            co2 = max(0, min(10000, co2))
+            temperature = max(0, min(60, temperature))
+            humidity = max(0, min(100, humidity))
             
             # Set inputs
-            self.risk_simulator.input['methane'] = methane
+            self.risk_simulator.input['methane'] = adjusted_methane
             self.risk_simulator.input['co2'] = co2
             self.risk_simulator.input['temperature'] = temperature
             self.risk_simulator.input['humidity'] = humidity
@@ -208,32 +226,40 @@ class FuzzyLogicSystem:
             # Compute
             self.risk_simulator.compute()
             
-            # Get risk score (handle potential None)
+            # Get risk score
             risk_score = self.risk_simulator.output.get('risk', 0)
             if risk_score is None:
                 risk_score = 0
             
-            # Determine level based on score
+            # Dumpsite risk level determination
             if risk_score >= 80:
                 level = "CRITICAL"
                 explosion_risk = 90
+                recommendation = "IMMEDIATE EVACUATION - High explosive gas detected!"
             elif risk_score >= 60:
                 level = "HIGH"
                 explosion_risk = 70
+                recommendation = "DANGER - Evacuate area and call emergency services"
             elif risk_score >= 35:
                 level = "MEDIUM"
                 explosion_risk = 45
+                recommendation = "WARNING - Investigate source, increase ventilation"
             elif risk_score >= 15:
                 level = "LOW"
                 explosion_risk = 20
+                recommendation = "CAUTION - Monitor situation, typical dumpsite levels"
             else:
                 level = "SAFE"
                 explosion_risk = 5
+                recommendation = "Normal dumpsite operation"
             
             return {
                 "level": level,
                 "score": round(float(risk_score), 2),
-                "explosion_risk": explosion_risk
+                "explosion_risk": explosion_risk,
+                "recommendation": recommendation,
+                "adjusted_methane": round(adjusted_methane, 1),
+                "raw_methane": round(methane, 1)
             }
             
         except Exception as e:
@@ -242,8 +268,10 @@ class FuzzyLogicSystem:
                 "level": "UNKNOWN",
                 "score": 0,
                 "explosion_risk": 0,
+                "recommendation": "System error - check sensors",
                 "error": str(e)
             }
+            
 # Initialize fuzzy system
 fuzzy_system = FuzzyLogicSystem()
 
