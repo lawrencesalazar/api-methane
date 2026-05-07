@@ -19,6 +19,13 @@ from skfuzzy import control as ctrl
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
 
+
+
+from sklearn.linear_model import LinearRegression
+from collections import deque
+import warnings
+warnings.filterwarnings('ignore')
+
 # ==============================
 # LOGGING
 # ==============================
@@ -90,6 +97,8 @@ def current_ph_time():
 def readable_time():
     return datetime.now(PH_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
+
+
 # ==============================
 # LOAD OR CREATE ML MODEL
 # ==============================
@@ -126,6 +135,292 @@ def save_model():
         pass
 
 load_or_create_model()
+
+ ==============================
+# REAL PREDICTION ENGINE WITH FUZZY LOGIC
+# ==============================
+
+class MethanePredictor:
+    """Real-time methane prediction using ML and fuzzy logic"""
+    
+    def __init__(self):
+        self.model = LinearRegression()
+        self.poly_features = PolynomialFeatures(degree=2)
+        self.is_trained = False
+        self.history_buffer = deque(maxlen=50)
+        self.prediction_confidence = 0.0
+        
+    def add_reading(self, methane, co2, temperature, humidity, timestamp):
+        """Add a new reading to history buffer"""
+        self.history_buffer.append({
+            'methane': methane,
+            'co2': co2,
+            'temperature': temperature,
+            'humidity': humidity,
+            'timestamp': timestamp
+        })
+        
+    def prepare_features(self, data):
+        """Prepare features for ML model"""
+        if len(data) < 5:
+            return None
+            
+        # Extract features
+        methane_values = [d['methane'] for d in data]
+        co2_values = [d['co2'] for d in data]
+        temp_values = [d['temperature'] for d in data]
+        humidity_values = [d['humidity'] for d in data]
+        
+        # Calculate trends
+        methane_trend = methane_values[-1] - methane_values[0] if len(methane_values) > 1 else 0
+        co2_trend = co2_values[-1] - co2_values[0] if len(co2_values) > 1 else 0
+        
+        # Calculate rolling statistics
+        methane_mean = np.mean(methane_values[-5:]) if len(methane_values) >= 5 else methane_values[-1]
+        methane_std = np.std(methane_values[-5:]) if len(methane_values) >= 5 else 0
+        methane_max = max(methane_values[-10:]) if methane_values else 0
+        methane_min = min(methane_values[-10:]) if methane_values else 0
+        
+        # Rate of change (slope)
+        if len(methane_values) >= 3:
+            x = np.arange(len(methane_values[-5:]))
+            y = np.array(methane_values[-5:])
+            slope = np.polyfit(x, y, 1)[0] if len(x) > 1 else 0
+        else:
+            slope = 0
+        
+        # Create feature vector
+        features = [
+            methane_values[-1],           # Current methane
+            methane_mean,                  # Recent average
+            methane_std,                   # Volatility
+            slope,                         # Rate of change
+            methane_trend,                 # Overall trend
+            co2_values[-1] if co2_values else 0,  # Current CO2
+            co2_trend,                     # CO2 trend
+            temp_values[-1] if temp_values else 25,  # Current temp
+            humidity_values[-1] if humidity_values else 50,  # Current humidity
+            methane_max,                   # Peak in window
+            methane_min                    # Minimum in window
+        ]
+        
+        return np.array(features).reshape(1, -1)
+    
+    def train_model(self, data):
+        """Train ML model on historical data"""
+        if len(data) < 10:
+            return False
+            
+        X_list = []
+        y_list = []
+        
+        # Create training sequences
+        for i in range(5, len(data) - 1):
+            window = data[i-5:i+1]
+            features = self.prepare_features(window)
+            if features is not None:
+                X_list.append(features.flatten())
+                y_list.append(data[i+1]['methane'] if i+1 < len(data) else data[i]['methane'])
+        
+        if len(X_list) > 5:
+            X = np.array(X_list)
+            y = np.array(y_list)
+            
+            # Transform features with polynomial features
+            X_poly = self.poly_features.fit_transform(X)
+            
+            # Train model
+            self.model.fit(X_poly, y)
+            self.is_trained = True
+            
+            # Calculate confidence based on R² score
+            r2 = self.model.score(X_poly, y)
+            self.prediction_confidence = min(0.95, max(0.5, r2))
+            
+            return True
+        return False
+    
+    def predict_fuzzy(self, current_methane, current_co2, current_temp, current_humidity, trend):
+        """Fuzzy logic based prediction adjustment"""
+        # Base prediction adjustment factors
+        adjustment = 0
+        
+        # Methane level influence
+        if current_methane > 800:
+            adjustment += 15  # High methane may lead to rapid increase
+        elif current_methane > 500:
+            adjustment += 8
+        elif current_methane > 300:
+            adjustment += 3
+        elif current_methane < 100:
+            adjustment -= 5  # Very low methane might decrease further
+        
+        # CO2 correlation (landfill gas composition)
+        if current_co2 > 1000 and current_methane > 400:
+            adjustment += 10  # High CO2 + high methane = active decomposition
+        elif current_co2 > 600:
+            adjustment += 5
+        
+        # Temperature effect (biological activity)
+        if current_temp > 35:
+            adjustment += 8  # High temp increases gas production
+        elif current_temp > 28:
+            adjustment += 3
+        elif current_temp < 20:
+            adjustment -= 3
+        
+        # Humidity effect
+        if current_humidity > 80:
+            adjustment += 5  # Moist conditions promote gas generation
+        
+        # Trend influence
+        if trend > 0:
+            adjustment += abs(trend) * 2
+        elif trend < 0:
+            adjustment -= abs(trend) * 1.5
+        
+        return adjustment
+    
+    def predict_next_values(self, current_data, hours_ahead=5):
+        """
+        Predict methane values for next N hours
+        Returns predictions with confidence intervals
+        """
+        if len(self.history_buffer) < 10:
+            # Fallback: simple trend-based prediction
+            return self._simple_prediction(current_data, hours_ahead)
+        
+        try:
+            # Prepare features
+            data_list = list(self.history_buffer)
+            features = self.prepare_features(data_list)
+            
+            if features is None:
+                return self._simple_prediction(current_data, hours_ahead)
+            
+            # Get base predictions from ML model
+            predictions = []
+            confidence_intervals = []
+            
+            current_methane = current_data.get('methane', 0)
+            current_co2 = current_data.get('co2', 0)
+            current_temp = current_data.get('temperature', 25)
+            current_humidity = current_data.get('humidity', 50)
+            
+            # Calculate trend from recent readings
+            recent_methane = [d['methane'] for d in data_list[-10:]]
+            if len(recent_methane) > 1:
+                x = np.arange(len(recent_methane))
+                slope = np.polyfit(x, recent_methane, 1)[0]
+                trend = slope
+            else:
+                trend = 0
+            
+            for i in range(hours_ahead):
+                # Transform features if model is trained
+                if self.is_trained:
+                    features_poly = self.poly_features.transform(features)
+                    base_pred = self.model.predict(features_poly)[0]
+                else:
+                    base_pred = current_methane
+                
+                # Apply fuzzy logic adjustment
+                fuzzy_adj = self.predict_fuzzy(
+                    current_methane, current_co2, 
+                    current_temp, current_humidity, trend
+                )
+                
+                # Time decay factor (predictions become less certain)
+                decay = 1.0 - (i * 0.05)  # 5% less weight per hour
+                
+                # Combine ML prediction with fuzzy adjustment
+                if i == 0:
+                    predicted = base_pred + (fuzzy_adj * 0.5)
+                else:
+                    # For subsequent predictions, add trend and decay
+                    trend_effect = trend * (1 + i * 0.1)
+                    predicted = predictions[-1] + (trend_effect * 0.5) + (fuzzy_adj * decay)
+                
+                # Ensure non-negative and reasonable limits
+                predicted = max(0, min(5000, predicted))
+                predictions.append(round(predicted, 2))
+                
+                # Calculate confidence interval
+                margin = max(5, predicted * 0.1) * (i + 1) * 0.5
+                confidence_intervals.append({
+                    'lower': round(max(0, predicted - margin), 2),
+                    'upper': round(min(5000, predicted + margin), 2)
+                })
+                
+                # Update current values for next iteration
+                current_methane = predicted
+                
+                # Update features for next prediction
+                new_features = features.copy()
+                new_features[0][0] = predicted
+                features = new_features
+            
+            return {
+                'predictions': predictions,
+                'confidence_intervals': confidence_intervals,
+                'confidence_score': round(self.prediction_confidence * 100, 1),
+                'trend': 'increasing' if trend > 2 else 'decreasing' if trend < -2 else 'stable',
+                'trend_magnitude': round(abs(trend), 2),
+                'model_trained': self.is_trained,
+                'data_points': len(self.history_buffer)
+            }
+            
+        except Exception as e:
+            print(f"Prediction error: {e}")
+            return self._simple_prediction(current_data, hours_ahead)
+    
+    def _simple_prediction(self, current_data, hours_ahead=5):
+        """Fallback simple prediction when ML not available"""
+        current_methane = current_data.get('methane', 200)
+        
+        # Get history if available
+        if len(self.history_buffer) >= 3:
+            recent = [d['methane'] for d in list(self.history_buffer)[-5:]]
+            if len(recent) > 1:
+                trend = (recent[-1] - recent[0]) / len(recent)
+            else:
+                trend = 0
+        else:
+            trend = 0
+        
+        predictions = []
+        confidence_intervals = []
+        current = current_methane
+        
+        for i in range(hours_ahead):
+            # Add trend with diminishing returns
+            trend_factor = trend * (1 - i * 0.1)
+            variation = np.random.normal(0, max(1, current * 0.03))
+            next_val = current + trend_factor + variation
+            next_val = max(0, min(5000, next_val))
+            predictions.append(round(next_val, 2))
+            
+            # Simple confidence interval
+            margin = max(10, next_val * 0.15) * (i + 1) * 0.3
+            confidence_intervals.append({
+                'lower': round(max(0, next_val - margin), 2),
+                'upper': round(min(5000, next_val + margin), 2)
+            })
+            
+            current = next_val
+        
+        return {
+            'predictions': predictions,
+            'confidence_intervals': confidence_intervals,
+            'confidence_score': 50.0,
+            'trend': 'increasing' if trend > 1 else 'decreasing' if trend < -1 else 'stable',
+            'trend_magnitude': round(abs(trend), 2),
+            'model_trained': False,
+            'data_points': len(self.history_buffer)
+        }
+
+# Initialize global predictor
+predictor = MethanePredictor()
 
 # ==============================
 # FUZZY LOGIC SYSTEM
@@ -587,8 +882,148 @@ def chart(sensor_id: str, limit: int = 20, offset: int = 0):
         }
 
 @app.get("/api/predict/{sensor_id}")
-def predict(sensor_id: str):
-    return {"predictions": predict_methane(sensor_id)}
+def predict(sensor_id: str, hours: int = 5):
+    """
+    Get real methane predictions based on fuzzy logic and ML
+    - hours: number of hours to predict (1-12, default 5)
+    """
+    try:
+        # Get historical data for training
+        history_data = safe_get(
+            firebase_db.child(f"sensorReadings/history/{sensor_id}")
+            .order_by_key().limit_to_last(50), {}
+        )
+        
+        if not history_data:
+            return {
+                "error": "Insufficient data for prediction",
+                "predictions": [],
+                "needs_more_data": True,
+                "required_data": 10,
+                "current_data": 0
+            }
+        
+        # Convert history to list and sort by timestamp
+        history_list = []
+        for key, value in history_data.items():
+            history_list.append({
+                'methane': float(value.get('methane', 0)),
+                'co2': float(value.get('co2', 0)),
+                'temperature': float(value.get('temperature', 25)),
+                'humidity': float(value.get('humidity', 50)),
+                'timestamp': value.get('timestamp', key)
+            })
+        
+        # Sort by timestamp (oldest first for training)
+        history_list.sort(key=lambda x: x['timestamp'])
+        
+        # Get current/latest reading
+        latest = safe_get(firebase_db.child(f"sensorReadings/latest/{sensor_id}"), {})
+        current_methane = float(latest.get('methane', 0))
+        current_co2 = float(latest.get('co2', 0))
+        current_temp = float(latest.get('temperature', 25))
+        current_humidity = float(latest.get('humidity', 50))
+        
+        # Add all history to predictor
+        for reading in history_list:
+            predictor.add_reading(
+                reading['methane'],
+                reading['co2'],
+                reading['temperature'],
+                reading['humidity'],
+                reading['timestamp']
+            )
+        
+        # Train model if enough data
+        if len(history_list) >= 10:
+            predictor.train_model(history_list)
+        
+        # Limit prediction hours to reasonable range
+        hours = max(1, min(12, hours))
+        
+        # Get predictions
+        predictions_result = predictor.predict_next_values(
+            {
+                'methane': current_methane,
+                'co2': current_co2,
+                'temperature': current_temp,
+                'humidity': current_humidity
+            },
+            hours_ahead=hours
+        )
+        
+        # Create readable time labels
+        from datetime import datetime, timedelta
+        import pytz
+        
+        ph_tz = pytz.timezone("Asia/Manila")
+        now = datetime.now(ph_tz)
+        time_labels = [(now + timedelta(hours=i+1)).strftime("%H:%M") for i in range(hours)]
+        
+        # Get fuzzy risk for context
+        risk = get_risk(latest) if latest else {"level": "UNKNOWN", "score": 0}
+        
+        return {
+            "sensor_id": sensor_id,
+            "current_methane": round(current_methane, 2),
+            "current_co2": round(current_co2, 2),
+            "current_temperature": round(current_temp, 1),
+            "current_humidity": round(current_humidity, 1),
+            "predictions": predictions_result['predictions'],
+            "confidence_intervals": predictions_result['confidence_intervals'],
+            "time_labels": time_labels,
+            "confidence_score": predictions_result['confidence_score'],
+            "trend": predictions_result['trend'],
+            "trend_magnitude": predictions_result['trend_magnitude'],
+            "model_trained": predictions_result['model_trained'],
+            "data_points_used": predictions_result['data_points'],
+            "current_risk": {
+                "level": risk.get('level', 'UNKNOWN'),
+                "score": risk.get('score', 0),
+                "explosion_risk": risk.get('explosion_risk', 0)
+            },
+            "interpretation": generate_prediction_interpretation(
+                predictions_result['predictions'],
+                current_methane,
+                risk.get('level', 'UNKNOWN')
+            )
+        }
+        
+    except Exception as e:
+        logger.error(f"Prediction error: {e}")
+        return {
+            "error": str(e),
+            "predictions": [],
+            "confidence_score": 0
+        }
+
+def generate_prediction_interpretation(predictions, current_methane, risk_level):
+    """Generate human-readable interpretation of predictions"""
+    if not predictions:
+        return "Insufficient data for prediction interpretation."
+    
+    max_pred = max(predictions)
+    final_pred = predictions[-1]
+    change = final_pred - current_methane
+    
+    if risk_level == "CRITICAL" or risk_level == "HIGH":
+        return f"⚠️ CRITICAL: Methane predicted to {'increase' if change > 0 else 'decrease'} from {current_methane:.0f} to {final_pred:.0f} ppm in next few hours. Immediate action required."
+    
+    elif risk_level == "MEDIUM":
+        if change > 50:
+            return f"⚠️ WARNING: Methane expected to rise significantly to {final_pred:.0f} ppm. Increase monitoring and prepare mitigation."
+        elif change > 10:
+            return f"📈 Methane predicted to increase to {final_pred:.0f} ppm. Enhanced monitoring recommended."
+        else:
+            return f"📊 Methane levels expected to remain relatively stable around {final_pred:.0f} ppm. Continue routine monitoring."
+    
+    else:
+        if change > 30:
+            return f"📈 Methane concentration predicted to rise to {final_pred:.0f} ppm. Monitor trend closely."
+        elif change < -20:
+            return f"📉 Methane levels expected to decrease to {final_pred:.0f} ppm. Favorable conditions."
+        else:
+            return f"✅ Methane predicted to remain stable at approximately {final_pred:.0f} ppm. Normal dumpsite conditions expected."
 
 # ==============================
 # ADDITIONAL FUZZY ADAPTATION (NEW)
