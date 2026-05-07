@@ -271,7 +271,7 @@ class FuzzyLogicSystem:
                 "recommendation": "System error - check sensors",
                 "error": str(e)
             }
-            
+        
 # Initialize fuzzy system
 fuzzy_system = FuzzyLogicSystem()
 
@@ -516,8 +516,75 @@ def metrics(sensor_id: str):
     return get_metrics(sensor_id)
 
 @app.get("/api/visualization/chart/{sensor_id}")
-def chart(sensor_id: str):
-    return get_chart(sensor_id)
+def chart(sensor_id: str, limit: int = 20, offset: int = 0):
+    """
+    Get historical chart data with pagination
+    - limit: number of records to return (default 20, max 100)
+    - offset: number of records to skip (for pagination)
+    """
+    try:
+        # Get total count first
+        history_ref = firebase_db.child(f"sensorReadings/history/{sensor_id}")
+        
+        # Get all keys to determine total count and paginate
+        all_data = safe_get(history_ref.order_by_key(), {})
+        
+        if not all_data:
+            return {
+                "timestamps": [], 
+                "methane": [], 
+                "co2": [],
+                "total": 0,
+                "has_more": False,
+                "offset": offset,
+                "limit": limit
+            }
+        
+        # Convert to list and sort by timestamp (oldest first or newest first)
+        items = list(all_data.items())
+        
+        # Sort by key (timestamp) - newest first for pagination
+        items.sort(key=lambda x: x[0], reverse=True)
+        
+        total = len(items)
+        
+        # Apply pagination
+        paginated_items = items[offset:offset + limit]
+        
+        # Prepare response
+        timestamps = []
+        methane = []
+        co2 = []
+        
+        for key, value in paginated_items:
+            timestamps.append(value.get("timestamp", key))
+            methane.append(float(value.get("methane", 0)))
+            co2.append(float(value.get("co2", 0)))
+        
+        # Check if more data available
+        has_more = (offset + limit) < total
+        
+        return {
+            "timestamps": timestamps,
+            "methane": methane,
+            "co2": co2,
+            "total": total,
+            "has_more": has_more,
+            "offset": offset,
+            "limit": limit,
+            "next_offset": offset + limit if has_more else None
+        }
+        
+    except Exception as e:
+        logger.error(f"Chart error: {e}")
+        return {
+            "timestamps": [], 
+            "methane": [], 
+            "co2": [],
+            "total": 0,
+            "has_more": False,
+            "error": str(e)
+        }
 
 @app.get("/api/predict/{sensor_id}")
 def predict(sensor_id: str):
