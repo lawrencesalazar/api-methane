@@ -193,14 +193,27 @@ class FuzzyLogicSystem:
     
     def calculate_risk(self, methane, co2, temperature, humidity):
         try:
-            self.risk_simulator.input['methane'] = max(0, min(1000, methane))
-            self.risk_simulator.input['co2'] = max(0, min(5000, co2))
-            self.risk_simulator.input['temperature'] = max(0, min(60, temperature))
-            self.risk_simulator.input['humidity'] = max(0, min(100, humidity))
+            # Clamp values to valid ranges
+            methane = max(0, min(1000, methane if methane > 0 else 0))
+            co2 = max(0, min(5000, co2 if co2 > 0 else 0))
+            temperature = max(0, min(60, temperature if temperature > 0 else 25))
+            humidity = max(0, min(100, humidity if humidity > 0 else 50))
+            
+            # Set inputs
+            self.risk_simulator.input['methane'] = methane
+            self.risk_simulator.input['co2'] = co2
+            self.risk_simulator.input['temperature'] = temperature
+            self.risk_simulator.input['humidity'] = humidity
+            
+            # Compute
             self.risk_simulator.compute()
             
-            risk_score = self.risk_simulator.output['risk']
+            # Get risk score (handle potential None)
+            risk_score = self.risk_simulator.output.get('risk', 0)
+            if risk_score is None:
+                risk_score = 0
             
+            # Determine level based on score
             if risk_score >= 80:
                 level = "CRITICAL"
                 explosion_risk = 90
@@ -222,10 +235,15 @@ class FuzzyLogicSystem:
                 "score": round(float(risk_score), 2),
                 "explosion_risk": explosion_risk
             }
+            
         except Exception as e:
-            logger.error(f"Fuzzy error: {e}")
-            return {"level": "UNKNOWN", "score": 0, "explosion_risk": 0}
-
+            logger.error(f"Fuzzy calculation error: {e}")
+            return {
+                "level": "UNKNOWN",
+                "score": 0,
+                "explosion_risk": 0,
+                "error": str(e)
+            }
 # Initialize fuzzy system
 fuzzy_system = FuzzyLogicSystem()
 
@@ -413,7 +431,50 @@ def summary(sensor_id: str):
 
 @app.get("/api/fuzzy/{sensor_id}")
 def fuzzy(sensor_id: str):
-    return {"risk": get_risk(sensor_id)}
+    """Get fuzzy risk assessment for a sensor"""
+    try:
+        # Fetch latest sensor data
+        latest_data = get_summary(sensor_id)
+        
+        if not latest_data or latest_data == {}:
+            return {
+                "risk": {
+                    "level": "NO_DATA",
+                    "score": 0,
+                    "explosion_risk": 0
+                },
+                "error": f"No data found for sensor {sensor_id}"
+            }
+        
+        # Extract values with defaults
+        methane = float(latest_data.get("methane", 0))
+        co2 = float(latest_data.get("co2", 0))
+        temperature = float(latest_data.get("temperature", 25))
+        humidity = float(latest_data.get("humidity", 50))
+        
+        # Calculate risk using fuzzy system
+        risk = fuzzy_system.calculate_risk(methane, co2, temperature, humidity)
+        
+        return {
+            "risk": risk,
+            "sensor_data": {
+                "methane": methane,
+                "co2": co2,
+                "temperature": temperature,
+                "humidity": humidity
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Fuzzy endpoint error: {e}")
+        return {
+            "risk": {
+                "level": "ERROR",
+                "score": 0,
+                "explosion_risk": 0
+            },
+            "error": str(e)
+        }
 
 @app.get("/api/model/metrics/{sensor_id}")
 def metrics(sensor_id: str):
