@@ -356,121 +356,121 @@ class MethanePredictor:
             return {'RMSE': None, 'MSE': None, 'MAE': None, 'R2': None}
 
     def train_model(self, data):
-    """Train ML model on historical data and calculate metrics"""
-    if len(data) < 10:
-        return False
-        
-    X_list = []
-    y_list = []
-    
-    # Get methane values
-    methane_values = [d['methane'] for d in data]
-    
-    # Calculate statistics for normalization
-    methane_mean = np.mean(methane_values)
-    methane_std = np.std(methane_values)
-    
-    # If data has very low variation, use simple baseline model
-    if methane_std < 5:  # Less than 5 ppm variation
-        logger.info(f"Low variation data (std={methane_std:.2f}). Using baseline model.")
-        self.is_trained = True
-        self.rmse = methane_std
-        self.mse = methane_std ** 2
-        self.mae = np.mean(np.abs(np.diff(methane_values))) if len(methane_values) > 1 else 0
-        self.r2 = 0.5  # Default moderate score for stable data
-        self.prediction_confidence = 75
-        self.last_training_time = datetime.now()
-        self.training_samples = len(data)
-        return True
-    
-    # Prepare training data - predict NEXT value from previous values
-    for i in range(5, len(data) - 1):
-        # Use previous 5 readings as features
-        prev_values = methane_values[i-5:i]
-        
-        # Features: last value, mean of last 5, trend, std deviation
-        features = [
-            prev_values[-1],                    # Last value
-            np.mean(prev_values),               # Mean of window
-            prev_values[-1] - prev_values[0],   # Trend over window
-            np.std(prev_values),                # Volatility
-            data[i]['temperature'],             # Temperature
-            data[i]['humidity']                 # Humidity
-        ]
-        X_list.append(features)
-        y_list.append(methane_values[i+1])  # Predict next value
-    
-    if len(X_list) < 5:
-        logger.warning(f"Insufficient training samples: {len(X_list)}")
-        return False
-    
-    try:
-        X = np.array(X_list)
-        y = np.array(y_list)
-        
-        # Normalize target values to improve stability
-        y_mean = np.mean(y)
-        y_std = max(np.std(y), 1.0)
-        y_normalized = (y - y_mean) / y_std
-        
-        # Split into train and validation sets
-        split_idx = int(len(X) * 0.8)
-        X_train = X[:split_idx]
-        y_train = y_normalized[:split_idx]
-        X_val = X[split_idx:]
-        y_val = y_normalized[split_idx:]
-        
-        # Scale features
-        from sklearn.preprocessing import StandardScaler
-        scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        
-        # Simple linear regression (avoid overfitting)
-        from sklearn.linear_model import Ridge
-        self.model = Ridge(alpha=1.0)
-        self.model.fit(X_train_scaled, y_train)
-        
-        # Validate
-        if len(X_val) > 0:
-            X_val_scaled = scaler.transform(X_val)
-            y_pred_normalized = self.model.predict(X_val_scaled)
-            y_pred = y_pred_normalized * y_std + y_mean
+        """Train ML model on historical data and calculate metrics"""
+        if len(data) < 10:
+            return False
             
-            # Calculate metrics on original scale
-            self.mse = float(mean_squared_error(y_val * y_std + y_mean, y_pred))
-            self.rmse = float(np.sqrt(self.mse))
-            self.mae = float(mean_absolute_error(y_val * y_std + y_mean, y_pred))
+        X_list = []
+        y_list = []
+        
+        # Get methane values
+        methane_values = [d['methane'] for d in data]
+        
+        # Calculate statistics for normalization
+        methane_mean = np.mean(methane_values)
+        methane_std = np.std(methane_values)
+        
+        # If data has very low variation, use simple baseline model
+        if methane_std < 5:  # Less than 5 ppm variation
+            logger.info(f"Low variation data (std={methane_std:.2f}). Using baseline model.")
+            self.is_trained = True
+            self.rmse = methane_std
+            self.mse = methane_std ** 2
+            self.mae = np.mean(np.abs(np.diff(methane_values))) if len(methane_values) > 1 else 0
+            self.r2 = 0.5  # Default moderate score for stable data
+            self.prediction_confidence = 75
+            self.last_training_time = datetime.now()
+            self.training_samples = len(data)
+            return True
+        
+        # Prepare training data - predict NEXT value from previous values
+        for i in range(5, len(data) - 1):
+            # Use previous 5 readings as features
+            prev_values = methane_values[i-5:i]
             
-            # Calculate R² carefully
-            ss_res = np.sum((y_val * y_std + y_mean - y_pred) ** 2)
-            ss_tot = np.sum((y_val * y_std + y_mean - np.mean(y_val * y_std + y_mean)) ** 2)
-            self.r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+            # Features: last value, mean of last 5, trend, std deviation
+            features = [
+                prev_values[-1],                    # Last value
+                np.mean(prev_values),               # Mean of window
+                prev_values[-1] - prev_values[0],   # Trend over window
+                np.std(prev_values),                # Volatility
+                data[i]['temperature'],             # Temperature
+                data[i]['humidity']                 # Humidity
+            ]
+            X_list.append(features)
+            y_list.append(methane_values[i+1])  # Predict next value
+        
+        if len(X_list) < 5:
+            logger.warning(f"Insufficient training samples: {len(X_list)}")
+            return False
+        
+        try:
+            X = np.array(X_list)
+            y = np.array(y_list)
             
-            # Clamp R² to reasonable range
-            self.r2 = max(-1.0, min(1.0, self.r2))
-        else:
-            # Use training metrics
-            y_pred_normalized = self.model.predict(X_train_scaled)
-            y_pred = y_pred_normalized * y_std + y_mean
-            self.mse = float(mean_squared_error(y_train * y_std + y_mean, y_pred))
-            self.rmse = float(np.sqrt(self.mse))
-            self.mae = float(mean_absolute_error(y_train * y_std + y_mean, y_pred))
-            self.r2 = 0.5  # Default for training-only evaluation
+            # Normalize target values to improve stability
+            y_mean = np.mean(y)
+            y_std = max(np.std(y), 1.0)
+            y_normalized = (y - y_mean) / y_std
+            
+            # Split into train and validation sets
+            split_idx = int(len(X) * 0.8)
+            X_train = X[:split_idx]
+            y_train = y_normalized[:split_idx]
+            X_val = X[split_idx:]
+            y_val = y_normalized[split_idx:]
+            
+            # Scale features
+            from sklearn.preprocessing import StandardScaler
+            scaler = StandardScaler()
+            X_train_scaled = scaler.fit_transform(X_train)
+            
+            # Simple linear regression (avoid overfitting)
+            from sklearn.linear_model import Ridge
+            self.model = Ridge(alpha=1.0)
+            self.model.fit(X_train_scaled, y_train)
+            
+            # Validate
+            if len(X_val) > 0:
+                X_val_scaled = scaler.transform(X_val)
+                y_pred_normalized = self.model.predict(X_val_scaled)
+                y_pred = y_pred_normalized * y_std + y_mean
+                
+                # Calculate metrics on original scale
+                self.mse = float(mean_squared_error(y_val * y_std + y_mean, y_pred))
+                self.rmse = float(np.sqrt(self.mse))
+                self.mae = float(mean_absolute_error(y_val * y_std + y_mean, y_pred))
+                
+                # Calculate R² carefully
+                ss_res = np.sum((y_val * y_std + y_mean - y_pred) ** 2)
+                ss_tot = np.sum((y_val * y_std + y_mean - np.mean(y_val * y_std + y_mean)) ** 2)
+                self.r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+                
+                # Clamp R² to reasonable range
+                self.r2 = max(-1.0, min(1.0, self.r2))
+            else:
+                # Use training metrics
+                y_pred_normalized = self.model.predict(X_train_scaled)
+                y_pred = y_pred_normalized * y_std + y_mean
+                self.mse = float(mean_squared_error(y_train * y_std + y_mean, y_pred))
+                self.rmse = float(np.sqrt(self.mse))
+                self.mae = float(mean_absolute_error(y_train * y_std + y_mean, y_pred))
+                self.r2 = 0.5  # Default for training-only evaluation
+            
+            self.is_trained = True
+            # Confidence based on R2 and data variation
+            variation_factor = min(1.0, methane_std / 20)  # More variation = more confidence
+            self.prediction_confidence = min(85, max(50, 50 + (self.r2 * 30) + (variation_factor * 10)))
+            self.last_training_time = datetime.now()
+            self.training_samples = len(X_list)
+            
+            logger.info(f"Model trained - RMSE: {self.rmse:.2f}, R2: {self.r2:.3f}, Std: {methane_std:.2f}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Training error: {e}")
+            return False
         
-        self.is_trained = True
-        # Confidence based on R2 and data variation
-        variation_factor = min(1.0, methane_std / 20)  # More variation = more confidence
-        self.prediction_confidence = min(85, max(50, 50 + (self.r2 * 30) + (variation_factor * 10)))
-        self.last_training_time = datetime.now()
-        self.training_samples = len(X_list)
-        
-        logger.info(f"Model trained - RMSE: {self.rmse:.2f}, R2: {self.r2:.3f}, Std: {methane_std:.2f}")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Training error: {e}")
-        return False
-    
     def predict_next_values(self, current_data, hours_ahead=5):
         """Predict methane values for next N hours"""
         # If data has low variation, use simple persistence forecast
