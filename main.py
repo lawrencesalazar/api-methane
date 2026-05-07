@@ -431,19 +431,21 @@ def summary(sensor_id: str):
 
 @app.get("/api/fuzzy/{sensor_id}")
 def fuzzy(sensor_id: str):
-    """Get fuzzy risk assessment for a sensor"""
+    """Get fuzzy risk assessment for a specific sensor"""
     try:
         # Fetch latest sensor data
         latest_data = get_summary(sensor_id)
         
         if not latest_data or latest_data == {}:
             return {
+                "status": "error",
+                "message": f"No data found for sensor {sensor_id}",
+                "sensor_id": sensor_id,
                 "risk": {
                     "level": "NO_DATA",
                     "score": 0,
                     "explosion_risk": 0
-                },
-                "error": f"No data found for sensor {sensor_id}"
+                }
             }
         
         # Extract values with defaults
@@ -456,26 +458,31 @@ def fuzzy(sensor_id: str):
         risk = fuzzy_system.calculate_risk(methane, co2, temperature, humidity)
         
         return {
-            "risk": risk,
+            "status": "success",
+            "sensor_id": sensor_id,
+            "timestamp": latest_data.get("timestamp", readable_time()),
             "sensor_data": {
                 "methane": methane,
                 "co2": co2,
                 "temperature": temperature,
                 "humidity": humidity
-            }
+            },
+            "risk": risk
         }
         
     except Exception as e:
         logger.error(f"Fuzzy endpoint error: {e}")
         return {
+            "status": "error",
+            "sensor_id": sensor_id,
+            "error": str(e),
             "risk": {
                 "level": "ERROR",
                 "score": 0,
                 "explosion_risk": 0
-            },
-            "error": str(e)
+            }
         }
-
+    
 @app.get("/api/model/metrics/{sensor_id}")
 def metrics(sensor_id: str):
     return get_metrics(sensor_id)
@@ -493,15 +500,61 @@ def predict(sensor_id: str):
 # ==============================
 @app.get("/api/fuzzy/config")
 def fuzzy_config():
-    """Get fuzzy logic configuration"""
+    """Get fuzzy logic system configuration (no sensor data needed)"""
     return {
-        "methane_range": [0, 1000],
-        "co2_range": [0, 5000],
-        "temperature_range": [0, 60],
-        "humidity_range": [0, 100],
-        "risk_levels": ["SAFE", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
+        "fuzzy_system": {
+            "name": "Methane Gas Risk Assessment",
+            "version": "1.0",
+            "inputs": [
+                {
+                    "name": "methane",
+                    "range": [0, 1000],
+                    "units": "ppm",
+                    "membership_functions": ["low", "medium", "high", "dangerous"]
+                },
+                {
+                    "name": "co2", 
+                    "range": [0, 5000],
+                    "units": "ppm",
+                    "membership_functions": ["normal", "elevated", "high", "dangerous"]
+                },
+                {
+                    "name": "temperature",
+                    "range": [0, 60],
+                    "units": "°C",
+                    "membership_functions": ["normal", "warm", "hot"]
+                },
+                {
+                    "name": "humidity",
+                    "range": [0, 100],
+                    "units": "%",
+                    "membership_functions": ["dry", "normal", "wet"]
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "risk",
+                    "range": [0, 100],
+                    "units": "%",
+                    "levels": ["SAFE", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
+                }
+            ],
+            "rule_count": 11,
+            "rule_list": [
+                "IF methane IS dangerous THEN risk IS critical",
+                "IF methane IS high AND co2 IS NOT normal THEN risk IS high",
+                "IF methane IS medium AND co2 IS elevated THEN risk IS medium",
+                "IF co2 IS dangerous AND methane IS medium THEN risk IS high",
+                "IF co2 IS high AND temperature IS hot THEN risk IS medium",
+                "IF temperature IS hot AND methane IS medium THEN risk IS high",
+                "IF temperature IS hot AND humidity IS dry THEN risk IS medium",
+                "IF humidity IS wet AND methane IS NOT low THEN risk IS medium",
+                "IF humidity IS wet AND temperature IS hot THEN risk IS high",
+                "IF methane IS low AND co2 IS normal THEN risk IS low"
+            ]
+        },
+        "status": "configured"
     }
-
 # ==============================
 # ROOT
 # ==============================
