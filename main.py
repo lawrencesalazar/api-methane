@@ -680,7 +680,7 @@ async def broadcast(data: dict):
 # API ENDPOINTS
 # ==============================
 #  accepts HTTP directly (no redirect)
-@app.post("/api/sensor/insert-gsm")
+@app.post("/api/sensor/insert-gsm/")
 async def insert_sensor_gsm(data: SensorInput):
     """Special endpoint for GSM module - accepts plain HTTP"""
     try:
