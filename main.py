@@ -35,8 +35,9 @@ logger = logging.getLogger("main")
 # ==============================
 # FASTAPI INIT
 # ==============================
-app = FastAPI(title="Methane Gas Monitoring API with Fuzzy Logic")
-
+app = FastAPI(title="Methane Gas Monitoring API with Fuzzy Logic",
+    redirect_slashes=False
+    ) 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
