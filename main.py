@@ -679,7 +679,46 @@ async def broadcast(data: dict):
 # ==============================
 # API ENDPOINTS
 # ==============================
+#  accepts HTTP directly (no redirect)
+@app.post("/api/sensor/insert-gsm")
+async def insert_sensor_gsm(data: SensorInput):
+    """Special endpoint for GSM module - accepts plain HTTP"""
+    try:
+        payload = data.dict()
+        sensor_id = payload["sensor_id"]
 
+        timestamp_key = current_ph_time()
+        payload["timestamp"] = readable_time()
+        
+        risk = get_risk(payload)
+        payload["risk"] = risk
+        
+        predictor = predictor_cache.get_predictor(sensor_id)
+        predictor.add_reading(
+            payload["methane"],
+            payload["co2"],
+            payload["temperature"],
+            payload["humidity"],
+            payload["timestamp"]
+        )
+        
+        history_list = get_history_list(sensor_id, 100)
+        if len(history_list) >= 10:
+            predictor_cache.train_if_needed(sensor_id, history_list)
+
+        if firebase_db:
+            firebase_db.child(f"sensorReadings/latest/{sensor_id}").set(payload)
+            firebase_db.child(f"sensorReadings/history/{sensor_id}/{timestamp_key}").set(payload)
+
+        await broadcast(payload)
+
+        return {"status": "success", "data": payload}
+
+    except Exception as e:
+        logger.error(f"Insert error: {e}")
+        return {"status": "error", "message": str(e)}
+        
+        
 @app.post("/api/sensor/insert")
 async def insert_sensor(data: SensorInput):
     try:
