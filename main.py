@@ -1429,79 +1429,28 @@ def model_metrics(sensor_id: str):
 # ============================================================
 
 @app.get("/api/visualization/chart/{sensor_id}")
-def chart_data(
-    sensor_id: str,
-    limit: int = 50
-):
+def chart_data(sensor_id: str, limit: int = 50, offset: int = 0):
 
     try:
+        history = get_history(sensor_id, limit=500)
 
-        history = get_history(
-            sensor_id,
-            limit
-        )
+        # reverse for newest-first UI
+        history = history[::-1]
 
-        timestamps = []
-
-        methane = []
-
-        co2 = []
-
-        temperature = []
-
-        humidity = []
-
-        for row in history:
-
-            timestamps.append(
-                row["timestamp"]
-            )
-
-            methane.append(
-                row["methane"]
-            )
-
-            co2.append(
-                row["co2"]
-            )
-
-            temperature.append(
-                row["temperature"]
-            )
-
-            humidity.append(
-                row["humidity"]
-            )
+        paginated = history[offset:offset + limit]
 
         return {
-
             "success": True,
-
-            "timestamps":
-            timestamps,
-
-            "methane":
-            methane,
-
-            "co2":
-            co2,
-
-            "temperature":
-            temperature,
-
-            "humidity":
-            humidity
+            "timestamps": [h["timestamp"] for h in paginated],
+            "methane": [h["methane"] for h in paginated],
+            "co2": [h["co2"] for h in paginated],
+            "temperature": [h["temperature"] for h in paginated],
+            "humidity": [h["humidity"] for h in paginated],
+            "total": len(history)
         }
 
     except Exception as e:
-
-        return {
-
-            "success": False,
-
-            "error": str(e)
-        }
-
+        return {"success": False, "error": str(e)}
 # ============================================================
 # LEGACY PREDICT
 # ============================================================
