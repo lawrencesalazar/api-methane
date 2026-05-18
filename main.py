@@ -241,13 +241,9 @@ def safe_get(ref, default=None):
 class SensorInput(BaseModel):
 
     sensor_id: str
-
     methane: float
-
     co2: float
-
     temperature: float
-
     humidity: float
 
 # ============================================================
@@ -406,15 +402,10 @@ class FuzzyLogicSystem:
     # ========================================================
 
     def calculate_risk(
-
         self,
-
         methane,
-
         co2,
-
         temperature,
-
         humidity
     ):
 
@@ -1036,48 +1027,60 @@ async def insert_sensor_gsm(data: SensorInput):
 # ============================================================
 # MANUAL TRAINING
 # ============================================================
-
 @app.post("/api/ml/train/{sensor_id}")
-def manual_train(sensor_id: str):
+def train_model(sensor_id: str):
 
     try:
-
         history = get_history(sensor_id, 500)
 
         if len(history) < 20:
-
             return {
-
                 "success": False,
-
-                "message":
-                "Need at least 20 records"
+                "message": "Need at least 20 records"
             }
 
         ai = AdvancedMethaneAI()
-
         result = ai.train(history)
 
         if result["success"]:
-
-            save_model_to_firebase(
-                sensor_id,
-                ai
-            )
-
-        return result
-
-    except Exception as e:
-
-        logger.error(f"Training Error: {e}")
+            save_model_to_firebase(sensor_id, ai)
 
         return {
+            "success": True,
+            "training": result
+        }
 
+    except Exception as e:
+        return {
             "success": False,
-
             "error": str(e)
         }
 
+    try:
+        history = get_history(sensor_id, 500)
+
+        if len(history) < 20:
+            return {
+                "success": False,
+                "message": "Need at least 20 records"
+            }
+
+        ai = AdvancedMethaneAI()
+        result = ai.train(history)
+
+        if result["success"]:
+            save_model_to_firebase(sensor_id, ai)
+
+        return {
+            "success": True,
+            "training": result
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
 # ============================================================
 # AI PREDICTION
 # ============================================================
@@ -1504,10 +1507,97 @@ def chart_data(
 # ============================================================
 
 @app.get("/api/predict/{sensor_id}")
-def legacy_predict(sensor_id: str):
+def predict(sensor_id: str):
 
-    return predict(sensor_id)
+    try:
+        history = get_history(sensor_id, 100)
 
+        if len(history) < 10:
+            return {
+                "success": False,
+                "message": "Insufficient history"
+            }
+
+        latest = history[-1]
+        model = load_model_from_firebase(sensor_id)
+
+        # =========================
+        # DEFAULT VALUES
+        # =========================
+        forecast_value = float(latest["methane"])
+        confidence = 0.0
+        trend = "STABLE"
+
+        # =========================
+        # ML PREDICTION
+        # =========================
+        if model:
+            pred = model.predict(history[-5:])
+            forecast_value = float(pred)
+
+            confidence = float(getattr(model, "r2", 0)) * 100
+
+        # =========================
+        # TREND ANALYSIS
+        # =========================
+        if forecast_value > latest["methane"]:
+            trend = "INCREASING"
+        elif forecast_value < latest["methane"]:
+            trend = "DECREASING"
+
+        # =========================
+        # RISK (FUZZY)
+        # =========================
+        risk = fuzzy_system.calculate_risk(
+            forecast_value,
+            latest["co2"],
+            latest["temperature"],
+            latest["humidity"]
+        )
+
+        # =========================
+        # RECOMMENDATION ENGINE
+        # =========================
+        recommendation = generate_recommendation(
+            risk,
+            forecast_value
+        )
+
+        return {
+            "success": True,
+
+            # CURRENT DATA
+            "current": {
+                "methane": latest["methane"],
+                "co2": latest["co2"],
+                "temperature": latest["temperature"],
+                "humidity": latest["humidity"]
+            },
+
+            # FORECAST DATA
+            "forecast": {
+                "methane": round(forecast_value, 2),
+                "trend": trend,
+                "confidence": round(confidence, 2)
+            },
+
+            # RISK ANALYSIS
+            "risk": risk,
+
+            # AI RECOMMENDATION (IMPORTANT FIX)
+            "recommendation": {
+                "message": recommendation,
+                "level": risk["level"]
+            },
+
+            "generated_at": readable_time()
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
 # ============================================================
 # ML STATUS
 # ============================================================
@@ -1563,7 +1653,6 @@ def retrain_check(sensor_id: str):
         return {
 
             "retrain_needed": True,
-
             "reason":
             "No trained model"
         }
@@ -1573,7 +1662,6 @@ def retrain_check(sensor_id: str):
         return {
 
             "retrain_needed": True,
-
             "reason":
             "Large new dataset available"
         }
@@ -1599,11 +1687,8 @@ def sensor_history(
     )
 
     return {
-
         "success": True,
-
         "records": history,
-
         "total":
         len(history)
     }
@@ -1616,13 +1701,9 @@ def sensor_history(
 def dashboard_summary(sensor_id: str):
 
     try:
-
         latest = safe_get(
-
             firebase_db.child(
-
                 f"sensorReadings/latest/{sensor_id}"
-
             ),
 
             {}
@@ -1631,9 +1712,7 @@ def dashboard_summary(sensor_id: str):
         if not latest:
 
             return {
-
                 "success": False,
-
                 "message":
                 "Sensor not found"
             }
@@ -1660,11 +1739,8 @@ def dashboard_summary(sensor_id: str):
         risk = fuzzy_system.calculate_risk(
 
             float(latest["methane"]),
-
             float(latest["co2"]),
-
             float(latest["temperature"]),
-
             float(latest["humidity"])
         )
 
@@ -1697,9 +1773,7 @@ def dashboard_summary(sensor_id: str):
     except Exception as e:
 
         return {
-
             "success": False,
-
             "error": str(e)
         }
 
@@ -1711,11 +1785,8 @@ def dashboard_summary(sensor_id: str):
 def health_check():
 
     return {
-
         "success": True,
-
         "status": "ONLINE",
-
         "server_time":
         readable_time(),
 
@@ -1739,58 +1810,34 @@ def root():
         "2.0",
 
         "features": [
-
             "Fuzzy Logic",
-
             "Machine Learning",
-
             "Random Forest",
-
             "Forecasting",
-
             "Realtime WebSocket",
-
             "Firebase",
-
             "ReactJS Ready",
-
             "Manual Training",
-
             "Base64 Model Storage"
         ],
 
         "endpoints": [
 
             "POST /api/sensor/insert",
-
             "POST /api/sensor/insert-gsm",
-
             "GET /api/sensors",
-
             "GET /api/sensor/summary/{sensor_id}",
-
             "GET /api/fuzzy/{sensor_id}",
-
             "GET /api/fuzzy/config",
-
             "POST /api/ml/train/{sensor_id}",
-
             "GET /api/ml/predict/{sensor_id}",
-
             "GET /api/ml/status/{sensor_id}",
-
             "GET /api/ml/retrain-check/{sensor_id}",
-
             "GET /api/model/metrics/{sensor_id}",
-
             "GET /api/visualization/chart/{sensor_id}",
-
             "GET /api/history/{sensor_id}",
-
             "GET /api/dashboard/{sensor_id}",
-
             "GET /api/health",
-
             "WS /ws"
         ]
     }
