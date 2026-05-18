@@ -399,7 +399,43 @@ class AdvancedMethaneAI:
         prediction = (rf * 0.7) + (ridge * 0.3)
         prediction = max(0, prediction)
         return round(float(prediction), 2)
+    
+    def predict_sequence(self, recent, steps=10):
+        if not self.is_trained:
+            return None
 
+        history = recent.copy()
+        forecast = []
+
+        for _ in range(steps):
+            features = [[
+                history[-1]["methane"],
+                history[-2]["methane"],
+                history[-3]["methane"],
+                history[-1]["co2"],
+                history[-1]["temperature"],
+                history[-1]["humidity"]
+            ]]
+
+            features_scaled = self.scaler.transform(features)
+
+            rf = self.rf_model.predict(features_scaled)[0]
+            ridge = self.ridge_model.predict(features_scaled)[0]
+
+            prediction = (rf * 0.7) + (ridge * 0.3)
+            prediction = max(0, float(prediction))
+
+            forecast.append(round(prediction, 2))
+
+            # simulate next step (IMPORTANT for recursion)
+            history.append({
+                "methane": prediction,
+                "co2": history[-1]["co2"],
+                "temperature": history[-1]["temperature"],
+                "humidity": history[-1]["humidity"]
+            })
+
+        return forecast
 # ============================================================
 # MODEL STORAGE FUNCTIONS
 # ============================================================
@@ -887,34 +923,37 @@ def predict(sensor_id: str):
         if not model:
             return {"success": False, "message": "Model not trained"}
 
-        prediction = model.predict(history[-3:])
+        # 🔥 MULTI STEP FORECAST
+        forecast_series = model.predict_sequence(history[-5:], steps=10)
+        # 🔥 REAL-TIME BROADCAST HERE
+        import asyncio
+
+        asyncio.create_task(broadcast({
+            "type": "forecast",
+            "sensor_id": sensor_id,
+            "forecast": forecast_series
+        }))
+        
         latest = history[-1]
 
-        # Forecast risk
+        # trend from last real value
+        trend = "INCREASING" if forecast_series[-1] > latest["methane"] else "DECREASING"
+
         risk = fuzzy_system.calculate_risk(
-            prediction,
+            forecast_series[-1],
             latest["co2"],
             latest["temperature"],
             latest["humidity"]
         )
 
-        recommendation = generate_recommendation(risk, prediction)
+        recommendation = generate_recommendation(risk, forecast_series[-1])
 
-        # Trend analysis
-        if prediction > latest["methane"]:
-            trend = "INCREASING"
-        elif prediction < latest["methane"]:
-            trend = "DECREASING"
-        else:
-            trend = "STABLE"
-
-        # Save forecast history
+        # SAVE FORECAST HISTORY (array now!)
         if firebase_db:
             firebase_db.child(f"forecastHistory/{sensor_id}/{current_ph_timestamp()}").set({
                 "current_methane": latest["methane"],
-                "forecast_methane": prediction,
+                "forecast_series": forecast_series,
                 "risk": risk,
-                "recommendation": recommendation,
                 "generated_at": readable_time()
             })
 
@@ -922,20 +961,32 @@ def predict(sensor_id: str):
             "success": True,
             "sensor_id": sensor_id,
             "current_methane": latest["methane"],
-            "forecast_methane": prediction,
+            "forecast": forecast_series,   # 🔥 IMPORTANT CHANGE
             "trend": trend,
             "forecast_risk": risk,
             "recommendation": recommendation,
             "confidence": round(model.training_accuracy * 100, 2),
-            "rmse": round(model.rmse, 2),
-            "mae": round(model.mae, 2),
-            "r2": round(model.r2, 2),
             "generated_at": readable_time()
         }
 
     except Exception as e:
-        logger.error(f"Prediction Error: {e}")
         return {"success": False, "error": str(e)}
+
+@app.get("/api/ml/realtime-forecast/{sensor_id}")
+def realtime_forecast(sensor_id: str):
+    history = get_history(sensor_id, 20)
+    model = load_model_from_firebase(sensor_id)
+
+    if not model:
+        return {"success": False}
+
+    forecast = model.predict_sequence(history[-5:], steps=5)
+
+    return {
+        "success": True,
+        "forecast": forecast,
+        "timestamp": readable_time()
+    }
 
 @app.get("/api/ml/status/{sensor_id}")
 def training_status(sensor_id: str):
