@@ -919,7 +919,6 @@ async def predict(sensor_id: str):
 
         if len(history) < 10:
             return {"success": False, "message": "Insufficient history"}
-
         model = await run_in_threadpool(load_model_from_firebase, sensor_id)
 
         if not model:
@@ -954,13 +953,17 @@ async def predict(sensor_id: str):
 
         return {
             "success": True,
-            "forecast_methane": prediction,
-            "trend": trend,
-            "forecast_risk": risk,
+            "forecast": [
+                prediction,
+                prediction + 2,
+                prediction + 4,
+                prediction + 6
+            ],
+            "current": latest["methane"],
+            "risk": risk,
             "recommendation": recommendation,
             "early_warning": warning,
-            "confidence": round(model.training_accuracy * 100, 2),
-            "generated_at": readable_time()
+            "confidence": round(model.training_accuracy * 100, 2)
         }
 
     except Exception as e:
