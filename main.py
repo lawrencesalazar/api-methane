@@ -910,58 +910,42 @@ def train_model(sensor_id: str):
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+from starlette.concurrency import run_in_threadpool
+
 @app.get("/api/ml/predict/{sensor_id}")
-def predict(sensor_id: str):
+async def predict(sensor_id: str):
     try:
-        history = get_history(sensor_id, 100)
+        history = await run_in_threadpool(get_history, sensor_id, 100)
 
         if len(history) < 10:
             return {"success": False, "message": "Insufficient history"}
 
-        model = load_model_from_firebase(sensor_id)
+        model = await run_in_threadpool(load_model_from_firebase, sensor_id)
 
         if not model:
             return {"success": False, "message": "Model not trained"}
 
-        # 🔥 MULTI STEP FORECAST
-        forecast_series = model.predict_sequence(history[-5:], steps=10)
-        # 🔥 REAL-TIME BROADCAST HERE
-        import asyncio
-
-        asyncio.create_task(broadcast({
-            "type": "forecast",
-            "sensor_id": sensor_id,
-            "forecast": forecast_series
-        }))
-        
+        prediction = model.predict(history[-3:])
         latest = history[-1]
 
-        # trend from last real value
-        trend = "INCREASING" if forecast_series[-1] > latest["methane"] else "DECREASING"
-
         risk = fuzzy_system.calculate_risk(
-            forecast_series[-1],
+            prediction,
             latest["co2"],
             latest["temperature"],
             latest["humidity"]
         )
 
-        recommendation = generate_recommendation(risk, forecast_series[-1])
+        recommendation = generate_recommendation(risk, prediction)
 
-        # SAVE FORECAST HISTORY (array now!)
-        if firebase_db:
-            firebase_db.child(f"forecastHistory/{sensor_id}/{current_ph_timestamp()}").set({
-                "current_methane": latest["methane"],
-                "forecast_series": forecast_series,
-                "risk": risk,
-                "generated_at": readable_time()
-            })
+        trend = (
+            "INCREASING" if prediction > latest["methane"]
+            else "DECREASING" if prediction < latest["methane"]
+            else "STABLE"
+        )
 
         return {
             "success": True,
-            "sensor_id": sensor_id,
-            "current_methane": latest["methane"],
-            "forecast": forecast_series,   # 🔥 IMPORTANT CHANGE
+            "forecast_methane": prediction,
             "trend": trend,
             "forecast_risk": risk,
             "recommendation": recommendation,
@@ -970,8 +954,9 @@ def predict(sensor_id: str):
         }
 
     except Exception as e:
+        logger.error(f"Prediction Error: {e}")
         return {"success": False, "error": str(e)}
-
+    
 @app.get("/api/ml/realtime-forecast/{sensor_id}")
 def realtime_forecast(sensor_id: str):
     history = get_history(sensor_id, 20)
