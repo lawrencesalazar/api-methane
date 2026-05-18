@@ -942,6 +942,15 @@ async def predict(sensor_id: str):
             else "DECREASING" if prediction < latest["methane"]
             else "STABLE"
         )
+        forecast_series = []
+
+        base = latest["methane"]
+        pred = prediction
+
+        for i in range(5):
+            step = base + (pred - base) * ((i + 1) / 5)
+            forecast_series.append(round(step, 2))
+        warning = early_warning_engine(history, forecast_series)
 
         return {
             "success": True,
@@ -949,6 +958,7 @@ async def predict(sensor_id: str):
             "trend": trend,
             "forecast_risk": risk,
             "recommendation": recommendation,
+            "early_warning": warning,
             "confidence": round(model.training_accuracy * 100, 2),
             "generated_at": readable_time()
         }
@@ -956,7 +966,32 @@ async def predict(sensor_id: str):
     except Exception as e:
         logger.error(f"Prediction Error: {e}")
         return {"success": False, "error": str(e)}
-    
+
+def early_warning_engine(history, forecast_series):
+    if len(history) < 5 or not forecast_series:
+        return {"status": "INSUFFICIENT_DATA"}
+
+    current = history[-1]["methane"]
+    future_peak = max(forecast_series)
+
+    increase_rate = (future_peak - current) / max(current, 1)
+
+    if increase_rate > 0.5:
+        level = "CRITICAL_WARNING"
+    elif increase_rate > 0.25:
+        level = "HIGH_WARNING"
+    elif increase_rate > 0.1:
+        level = "CAUTION"
+    else:
+        level = "STABLE"
+
+    return {
+        "level": level,
+        "increase_rate": round(increase_rate, 3),
+        "current": current,
+        "future_peak": future_peak
+    }
+
 @app.get("/api/ml/realtime-forecast/{sensor_id}")
 def realtime_forecast(sensor_id: str):
     history = get_history(sensor_id, 20)
