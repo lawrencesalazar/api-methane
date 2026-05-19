@@ -31,7 +31,12 @@ import numpy as np
 import pandas as pd
 import pytz
 
-from datetime import datetime
+import asyncio
+from datetime import datetime, timedelta
+from typing import Dict, Any, Optional
+import threading
+import time
+ 
 from typing import List
 from typing import Optional
 
@@ -1208,33 +1213,704 @@ def root():
             "Threshold Management",
             "Alert Logging"
         ],
-        "endpoints": [
-            "POST /api/sensor/insert",
-            "POST /api/sensor/insert-gsm",
-            "GET /api/sensors",
-            "GET /api/sensor/summary/{sensor_id}",
-            "GET /api/fuzzy/{sensor_id}",
-            "GET /api/fuzzy/config",
-            "POST /api/ml/train/{sensor_id}",
-            "GET /api/ml/predict/{sensor_id}",
-            "GET /api/ml/status/{sensor_id}",
-            "GET /api/ml/retrain-check/{sensor_id}",
-            "GET /api/model/metrics/{sensor_id}",
-            "GET /api/visualization/chart/{sensor_id}",
-            "GET /api/history/{sensor_id}",
-            "GET /api/dashboard/{sensor_id}",
-            "GET /api/health",
-            "GET /api/threshold/{sensor_id}",
-            "POST /api/threshold/{sensor_id}",
-            "GET /api/threshold/list",
-            "POST /api/threshold/{sensor_id}/reset",
-            "POST /api/threshold/bulk",
-            "POST /api/alert/log",
-            "GET /api/alerts/{sensor_id}",
-            "GET /api/alerts/summary/{sensor_id}",
-            "WS /ws"
-        ]
+        
     }
+
+# ============================================================
+# CONTINUOUS FORECASTING ENGINE WITH DYNAMIC RECOMMENDATIONS
+# ============================================================
+
+class ContinuousForecastEngine:
+    """
+    Continuous forecasting engine that runs every 2 minutes to predict next methane gas levels
+    and provide dynamic recommendations based on trained model metrics.
+    """
+    
+    def __init__(self, sensor_id: str, forecast_interval_seconds: int = 120):
+        """
+        Initialize the continuous forecast engine
+        
+        Args:
+            sensor_id: The sensor ID to monitor
+            forecast_interval_seconds: Interval between forecasts (default 120 seconds = 2 minutes)
+        """
+        self.sensor_id = sensor_id
+        self.forecast_interval = forecast_interval_seconds
+        self.is_running = False
+        self.forecast_thread = None
+        self.last_forecast = None
+        self.forecast_history = []
+        
+    def get_model_metrics(self, model) -> Dict[str, Any]:
+        """Extract detailed metrics from the trained model"""
+        if not model or not model.is_trained:
+            return {
+                "is_trained": False,
+                "message": "Model not yet trained"
+            }
+        
+        return {
+            "is_trained": True,
+            "accuracy_percentage": round(model.training_accuracy * 100, 2),
+            "rmse": round(model.rmse, 2),
+            "mae": round(model.mae, 2),
+            "r2_score": round(model.r2, 4),
+            "algorithm_used": "Random Forest + Ridge Hybrid (70% RF, 30% Ridge)",
+            "algorithm_details": {
+                "random_forest": {
+                    "n_estimators": 150,
+                    "weight": 0.7,
+                    "type": "Ensemble Learning"
+                },
+                "ridge_regression": {
+                    "alpha": 1.0,
+                    "weight": 0.3,
+                    "type": "Linear Regression with L2 Regularization"
+                }
+            },
+            "preprocessing": "StandardScaler with Z-score normalization",
+            "feature_columns": ["methane_prev1", "methane_prev2", "methane_prev3", "co2_prev1", "temperature_prev1", "humidity_prev1"],
+            "target_column": "methane_current"
+        }
+    
+    def get_training_metadata(self, history_length: int, model) -> Dict[str, Any]:
+        """Get training metadata including split value and training details"""
+        if not model or not model.is_trained:
+            return {
+                "trained": False,
+                "message": "No trained model available"
+            }
+        
+        # Default split value (80/20 from training)
+        split_value = 0.2  # 20% test, 80% training
+        
+        return {
+            "trained": True,
+            "total_records_available": history_length,
+            "training_samples": int(history_length * 0.8) if history_length >= 20 else 0,
+            "testing_samples": int(history_length * 0.2) if history_length >= 20 else 0,
+            "split_ratio": f"80:20 (Train:Test)",
+            "split_value": split_value,
+            "last_training_date": model.last_training,
+            "minimum_required_samples": 20,
+            "is_sufficient_data": history_length >= 20
+        }
+    
+    def generate_dynamic_recommendation(self, current_level: float, forecasted_level: float, 
+                                       risk_level: str, metrics: Dict) -> Dict[str, Any]:
+        """
+        Generate dynamic recommendations based on forecast and current conditions
+        
+        Args:
+            current_level: Current methane level
+            forecasted_level: Forecasted next methane level
+            risk_level: Current risk level from fuzzy logic
+            metrics: Model metrics
+        
+        Returns:
+            Dictionary containing recommendations and actions
+        """
+        level_difference = forecasted_level - current_level
+        percent_change = (level_difference / current_level * 100) if current_level > 0 else 0
+        
+        # Determine trend
+        if percent_change > 20:
+            trend = "RAPID_INCREASE"
+            urgency = "CRITICAL"
+        elif percent_change > 10:
+            trend = "SIGNIFICANT_INCREASE"
+            urgency = "HIGH"
+        elif percent_change > 5:
+            trend = "MODERATE_INCREASE"
+            urgency = "MEDIUM"
+        elif percent_change > 0:
+            trend = "SLIGHT_INCREASE"
+            urgency = "LOW"
+        elif percent_change < -20:
+            trend = "RAPID_DECREASE"
+            urgency = "LOW"
+        elif percent_change < -10:
+            trend = "SIGNIFICANT_DECREASE"
+            urgency = "LOW"
+        elif percent_change < 0:
+            trend = "SLIGHT_DECREASE"
+            urgency = "VERY_LOW"
+        else:
+            trend = "STABLE"
+            urgency = "LOW"
+        
+        # Generate recommendations based on conditions
+        recommendations = []
+        actions = []
+        
+        # Risk-based recommendations
+        if risk_level == "CRITICAL":
+            recommendations.append("⚠️ CRITICAL: Immediate evacuation required!")
+            recommendations.append("🚨 Activate emergency ventilation systems")
+            recommendations.append("📢 Alert all personnel in the area")
+            actions.append("EMERGENCY_SHUTDOWN")
+            actions.append("EVACUATION")
+        elif risk_level == "HIGH":
+            recommendations.append("🔴 HIGH RISK: Increase ventilation immediately")
+            recommendations.append("⚠️ Prepare for potential evacuation")
+            recommendations.append("📊 Monitor reading every 30 seconds")
+            actions.append("INCREASE_VENTILATION")
+        elif risk_level == "MEDIUM":
+            recommendations.append("🟡 MEDIUM RISK: Enhance monitoring frequency")
+            recommendations.append("💨 Ensure ventilation systems are operational")
+            recommendations.append("📋 Review safety protocols")
+            actions.append("ENHANCE_MONITORING")
+        
+        # Trend-based recommendations
+        if trend == "RAPID_INCREASE":
+            recommendations.append("⚡ RAPID INCREASE detected! Immediate investigation required")
+            recommendations.append("🔍 Check for potential gas leaks")
+            actions.append("URGENT_INVESTIGATION")
+        elif trend == "SIGNIFICANT_INCREASE":
+            recommendations.append("📈 Significant upward trend - Investigate source")
+            recommendations.append("🛡️ Increase safety zone perimeter")
+            actions.append("INCREASE_SAFETY_ZONE")
+        elif trend == "MODERATE_INCREASE":
+            recommendations.append("📊 Moderate increase - Monitor closely")
+            recommendations.append("💨 Verify ventilation efficiency")
+            actions.append("VERIFY_VENTILATION")
+        
+        # Forecast-based specific recommendations
+        if forecasted_level > 50000:  # Explosive level
+            recommendations.append("💣 EXPLOSIVE LEVEL FORECASTED! Full emergency protocols activated")
+            actions.append("EXPLOSIVE_PROTOCOL")
+        elif forecasted_level > 5000:  # Danger level
+            recommendations.append("⚠️ Danger level expected within next reading interval")
+            recommendations.append("🛑 Prepare for automatic shutdown")
+            actions.append("AUTO_SHUTDOWN_PREPARE")
+        elif forecasted_level > 500:  # Warning level
+            recommendations.append("⚠️ Warning threshold may be exceeded soon")
+            recommendations.append("📢 Notify safety officer")
+            actions.append("NOTIFY_SAFETY")
+        
+        # Model confidence based recommendations
+        confidence_score = metrics.get("accuracy_percentage", 0)
+        if confidence_score < 60:
+            recommendations.append("📉 Low model confidence - Recommend model retraining")
+            recommendations.append("📊 Cross-validate with additional sensors")
+            actions.append("RETRAIN_MODEL")
+        elif confidence_score < 75:
+            recommendations.append("📊 Moderate confidence - Consider additional validation")
+            actions.append("VALIDATE_FORECAST")
+        
+        # Remove duplicates while preserving order
+        unique_recommendations = []
+        for rec in recommendations:
+            if rec not in unique_recommendations:
+                unique_recommendations.append(rec)
+        
+        unique_actions = []
+        for act in actions:
+            if act not in unique_actions:
+                unique_actions.append(act)
+        
+        return {
+            "trend": trend,
+            "urgency": urgency,
+            "percent_change": round(percent_change, 2),
+            "absolute_change": round(level_difference, 2),
+            "recommendations": unique_recommendations,
+            "recommended_actions": unique_actions,
+            "priority": urgency
+        }
+    
+    async def perform_forecast(self) -> Dict[str, Any]:
+        """
+        Perform a single forecast iteration with all metrics and recommendations
+        
+        Returns:
+            Dictionary containing complete forecast data with metrics and recommendations
+        """
+        try:
+            # Get history and model
+            history = get_history(self.sensor_id, 200)
+            
+            if len(history) < 10:
+                return {
+                    "success": False,
+                    "error": "Insufficient history data for forecasting",
+                    "records_available": len(history),
+                    "records_required": 10
+                }
+            
+            model = load_model_from_firebase(self.sensor_id)
+            
+            if not model or not model.is_trained:
+                return {
+                    "success": False,
+                    "error": "Model not trained yet",
+                    "requires_training": True,
+                    "message": "Please train the model first using /api/ml/train endpoint"
+                }
+            
+            # Get current and historical data
+            latest_data = history[-1] if history else None
+            if not latest_data:
+                return {"success": False, "error": "No current data available"}
+            
+            # Perform forecast
+            current_methane = latest_data["methane"]
+            forecasted_methane = model.predict(history[-3:])
+            
+            # Get fuzzy risk assessment
+            risk = fuzzy_system.calculate_risk(
+                forecasted_methane,
+                latest_data["co2"],
+                latest_data["temperature"],
+                latest_data["humidity"]
+            )
+            
+            # Get model metrics
+            model_metrics = self.get_model_metrics(model)
+            
+            # Get training metadata
+            training_metadata = self.get_training_metadata(len(history), model)
+            
+            # Generate dynamic recommendation
+            recommendation = self.generate_dynamic_recommendation(
+                current_methane,
+                forecasted_methane,
+                risk["level"],
+                model_metrics
+            )
+            
+            # Get threshold information
+            threshold = get_threshold_from_firebase(self.sensor_id)
+            
+            # Calculate confidence interval (based on model R2 score and historical variance)
+            confidence_interval = {
+                "lower": forecasted_methane - (model.rmse * 1.96),
+                "upper": forecasted_methane + (model.rmse * 1.96),
+                "confidence_level": 0.95
+            }
+            
+            # Prepare forecast result
+            forecast_result = {
+                "success": True,
+                "timestamp": readable_time(),
+                "sensor_id": self.sensor_id,
+                "forecast_interval_minutes": self.forecast_interval / 60,
+                
+                # Current and Forecast Data
+                "current_data": {
+                    "methane_ppm": current_methane,
+                    "co2_ppm": latest_data["co2"],
+                    "temperature_c": latest_data["temperature"],
+                    "humidity_percent": latest_data["humidity"],
+                    "timestamp": latest_data.get("timestamp", readable_time())
+                },
+                
+                "forecast_data": {
+                    "next_methane_ppm": forecasted_methane,
+                    "forecast_time": (datetime.now(PH_TZ) + timedelta(seconds=self.forecast_interval)).strftime("%Y-%m-%d %H:%M:%S"),
+                    "confidence_interval": confidence_interval,
+                    "prediction_interval_minutes": self.forecast_interval / 60
+                },
+                
+                # Risk Assessment
+                "risk_assessment": {
+                    "current_risk_level": risk["level"],
+                    "risk_score": risk["score"],
+                    "forecast_risk_level": self._estimate_future_risk(risk["score"], forecasted_methane, current_methane),
+                    "risk_trend": "INCREASING" if forecasted_methane > current_methane else "DECREASING"
+                },
+                
+                # Model Performance Metrics
+                "model_metrics": model_metrics,
+                
+                # Training Information
+                "training_info": training_metadata,
+                
+                # Dynamic Recommendations
+                "recommendations": recommendation,
+                
+                # Threshold Information
+                "thresholds": {
+                    "warning": threshold.get("warning_level", 500),
+                    "danger": threshold.get("danger_level", 5000),
+                    "explosive": threshold.get("explosive_level", 50000)
+                },
+                
+                # Alert Status
+                "alert_status": {
+                    "warning_triggered": forecasted_methane >= threshold.get("warning_level", 500),
+                    "danger_triggered": forecasted_methane >= threshold.get("danger_level", 5000),
+                    "explosive_triggered": forecasted_methane >= threshold.get("explosive_level", 50000)
+                }
+            }
+            
+            # Save to Firebase for historical tracking
+            if firebase_db:
+                forecast_ref = firebase_db.child(f"forecasts/{self.sensor_id}/{current_ph_timestamp()}")
+                forecast_ref.set({
+                    "timestamp": readable_time(),
+                    "current_methane": current_methane,
+                    "forecasted_methane": forecasted_methane,
+                    "risk_level": risk["level"],
+                    "model_accuracy": model_metrics.get("accuracy_percentage", 0),
+                    "recommendations": recommendation["recommendations"][:3] if recommendation["recommendations"] else []
+                })
+            
+            # Store last forecast
+            self.last_forecast = forecast_result
+            self.forecast_history.append({
+                "timestamp": readable_time(),
+                "forecast": forecasted_methane,
+                "actual": None  # Will be filled when actual data comes in
+            })
+            
+            # Keep only last 100 forecasts in history
+            if len(self.forecast_history) > 100:
+                self.forecast_history = self.forecast_history[-100:]
+            
+            # Broadcast via WebSocket if available
+            try:
+                await broadcast({
+                    "type": "FORECAST_UPDATE",
+                    "data": {
+                        "sensor_id": self.sensor_id,
+                        "forecast": forecasted_methane,
+                        "current": current_methane,
+                        "risk": risk["level"],
+                        "recommendations": recommendation["recommendations"][:3]
+                    }
+                })
+            except:
+                pass  # WebSocket broadcast failed, continue anyway
+            
+            return forecast_result
+            
+        except Exception as e:
+            logger.error(f"Forecast error for sensor {self.sensor_id}: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "timestamp": readable_time(),
+                "sensor_id": self.sensor_id
+            }
+    
+    def _estimate_future_risk(self, current_risk_score: float, forecasted: float, current: float) -> str:
+        """Estimate future risk level based on forecast"""
+        risk_change = (forecasted - current) / max(current, 1)
+        adjusted_risk = current_risk_score + (risk_change * 20)  # Rough adjustment
+        
+        if adjusted_risk >= 80:
+            return "CRITICAL"
+        elif adjusted_risk >= 60:
+            return "HIGH"
+        elif adjusted_risk >= 40:
+            return "MEDIUM"
+        elif adjusted_risk >= 20:
+            return "LOW"
+        else:
+            return "SAFE"
+    
+    def forecast_loop(self):
+        """Background thread loop for continuous forecasting"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        while self.is_running:
+            try:
+                # Perform forecast
+                result = loop.run_until_complete(self.perform_forecast())
+                
+                # Log forecast results
+                if result.get("success"):
+                    logger.info(f"Forecast completed for {self.sensor_id}: "
+                              f"Current: {result['current_data']['methane_ppm']} ppm, "
+                              f"Forecast: {result['forecast_data']['next_methane_ppm']} ppm, "
+                              f"Risk: {result['risk_assessment']['current_risk_level']}")
+                    
+                    # Log any critical alerts
+                    if result["alert_status"]["explosive_triggered"]:
+                        logger.warning(f"EXPLOSIVE LEVEL FORECASTED for {self.sensor_id}!")
+                    elif result["alert_status"]["danger_triggered"]:
+                        logger.warning(f"DANGER LEVEL FORECASTED for {self.sensor_id}!")
+                else:
+                    logger.warning(f"Forecast failed for {self.sensor_id}: {result.get('error', 'Unknown error')}")
+                
+                # Wait for next forecast interval
+                time.sleep(self.forecast_interval)
+                
+            except Exception as e:
+                logger.error(f"Forecast loop error: {e}")
+                time.sleep(60)  # Wait a minute before retrying
+    
+    def start_forecasting(self):
+        """Start the continuous forecasting thread"""
+        if self.is_running:
+            logger.warning(f"Forecasting already running for {self.sensor_id}")
+            return False
+        
+        self.is_running = True
+        self.forecast_thread = threading.Thread(target=self.forecast_loop, daemon=True)
+        self.forecast_thread.start()
+        logger.info(f"Started continuous forecasting for {self.sensor_id} (every {self.forecast_interval/60} minutes)")
+        return True
+    
+    def stop_forecasting(self):
+        """Stop the continuous forecasting thread"""
+        self.is_running = False
+        if self.forecast_thread:
+            self.forecast_thread.join(timeout=5)
+        logger.info(f"Stopped forecasting for {self.sensor_id}")
+        return True
+    
+    def get_last_forecast(self):
+        """Get the most recent forecast result"""
+        return self.last_forecast
+    
+    def get_forecast_history(self, limit: int = 20):
+        """Get forecast history"""
+        return self.forecast_history[-limit:]
+
+
+# Global dictionary to store forecast engines for different sensors
+forecast_engines: Dict[str, ContinuousForecastEngine] = {}
+
+
+def get_forecast_engine(sensor_id: str) -> ContinuousForecastEngine:
+    """Get or create a forecast engine for a sensor"""
+    if sensor_id not in forecast_engines:
+        forecast_engines[sensor_id] = ContinuousForecastEngine(sensor_id, forecast_interval_seconds=120)
+    return forecast_engines[sensor_id]
+
+
+# ============================================================
+# API ENDPOINTS - CONTINUOUS FORECASTING
+# ============================================================
+
+@app.post("/api/forecast/start/{sensor_id}")
+async def start_continuous_forecast(sensor_id: str):
+    """Start continuous 2-minute forecasting for a sensor"""
+    try:
+        # Check if model exists
+        model = load_model_from_firebase(sensor_id)
+        if not model or not model.is_trained:
+            return {
+                "success": False,
+                "error": "Model not trained. Please train the model first using /api/ml/train endpoint",
+                "requires_training": True
+            }
+        
+        # Get or create forecast engine
+        engine = get_forecast_engine(sensor_id)
+        
+        # Start forecasting
+        if engine.start_forecasting():
+            return {
+                "success": True,
+                "message": f"Continuous forecasting started for sensor {sensor_id}",
+                "forecast_interval_minutes": engine.forecast_interval / 60,
+                "sensor_id": sensor_id
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Forecasting already running or failed to start"
+            }
+            
+    except Exception as e:
+        logger.error(f"Error starting forecast: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/forecast/stop/{sensor_id}")
+async def stop_continuous_forecast(sensor_id: str):
+    """Stop continuous forecasting for a sensor"""
+    try:
+        if sensor_id in forecast_engines:
+            engine = forecast_engines[sensor_id]
+            engine.stop_forecasting()
+            return {
+                "success": True,
+                "message": f"Continuous forecasting stopped for sensor {sensor_id}"
+            }
+        else:
+            return {
+                "success": False,
+                "message": f"No active forecasting for sensor {sensor_id}"
+            }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/forecast/now/{sensor_id}")
+async def get_forecast_now(sensor_id: str):
+    """Get immediate forecast (single prediction) with all metrics"""
+    try:
+        engine = get_forecast_engine(sensor_id)
+        result = await engine.perform_forecast()
+        return result
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/forecast/status/{sensor_id}")
+async def get_forecast_status(sensor_id: str):
+    """Get status of continuous forecasting"""
+    try:
+        if sensor_id in forecast_engines:
+            engine = forecast_engines[sensor_id]
+            last_forecast = engine.get_last_forecast()
+            
+            return {
+                "success": True,
+                "is_running": engine.is_running,
+                "forecast_interval_seconds": engine.forecast_interval,
+                "last_forecast_time": last_forecast.get("timestamp") if last_forecast else None,
+                "last_forecast_result": last_forecast,
+                "history_count": len(engine.get_forecast_history())
+            }
+        else:
+            return {
+                "success": True,
+                "is_running": False,
+                "message": "No active forecast engine for this sensor"
+            }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/forecast/history/{sensor_id}")
+async def get_forecast_history(sensor_id: str, limit: int = 20):
+    """Get forecast history for a sensor"""
+    try:
+        if sensor_id in forecast_engines:
+            engine = forecast_engines[sensor_id]
+            history = engine.get_forecast_history(limit)
+            return {
+                "success": True,
+                "sensor_id": sensor_id,
+                "history": history,
+                "total": len(history)
+            }
+        else:
+            return {
+                "success": False,
+                "message": "No forecast history available"
+            }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/forecast/metrics/{sensor_id}")
+async def get_forecast_metrics(sensor_id: str):
+    """Get comprehensive forecast metrics including model performance"""
+    try:
+        model = load_model_from_firebase(sensor_id)
+        history = get_history(sensor_id, 200)
+        
+        if not model or not model.is_trained:
+            return {
+                "success": False,
+                "message": "Model not trained",
+                "requires_training": True
+            }
+        
+        # Calculate additional metrics
+        predictions = []
+        actuals = []
+        
+        # Validate forecast accuracy with historical data
+        if len(history) > 10:
+            X, y = model.prepare_dataset(history[-50:])
+            if len(X) > 0:
+                X_scaled = model.scaler.transform(X)
+                rf_pred = model.rf_model.predict(X_scaled)
+                ridge_pred = model.ridge_model.predict(X_scaled)
+                ensemble_pred = (rf_pred * 0.7) + (ridge_pred * 0.3)
+                
+                predictions = ensemble_pred.tolist()
+                actuals = y.tolist()
+        
+        engine = get_forecast_engine(sensor_id)
+        
+        return {
+            "success": True,
+            "sensor_id": sensor_id,
+            "forecast_engine_running": sensor_id in forecast_engines and forecast_engines[sensor_id].is_running,
+            "model_metrics": {
+                "algorithm": "Random Forest + Ridge Hybrid",
+                "rf_weight": 0.7,
+                "ridge_weight": 0.3,
+                "rmse": round(model.rmse, 2),
+                "mae": round(model.mae, 2),
+                "r2": round(model.r2, 4),
+                "accuracy_percentage": round(model.training_accuracy * 100, 2)
+            },
+            "training_metadata": {
+                "total_records_available": len(history),
+                "split_ratio": "80:20",
+                "split_value": 0.2,
+                "last_training": model.last_training
+            },
+            "validation_metrics": {
+                "sample_predictions": len(predictions),
+                "sample_actuals": len(actuals),
+                "validation_rmse": round(np.sqrt(mean_squared_error(actuals[-10:], predictions[-10:])), 2) if len(predictions) > 0 else None
+            },
+            "forecast_configuration": {
+                "interval_seconds": 120,
+                "interval_minutes": 2,
+                "auto_start": False
+            }
+        }
+        
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# ============================================================
+# AUTOMATIC FORECAST START ON MODEL TRAINING (OPTIONAL)
+# ============================================================
+
+# Modify the train_model endpoint to optionally auto-start forecasting
+@app.post("/api/ml/train-with-forecast/{sensor_id}")
+async def train_model_with_forecast(sensor_id: str, auto_start_forecast: bool = True):
+    """Train model and optionally start continuous forecasting"""
+    try:
+        # First train the model
+        history = get_history(sensor_id, 500)
+        
+        if len(history) < 20:
+            return {"success": False, "message": "Need at least 20 records for training"}
+        
+        ai = AdvancedMethaneAI()
+        result = ai.train(history)
+        
+        if result["success"]:
+            save_model_to_firebase(sensor_id, ai)
+            
+            # Auto-start forecasting if requested
+            if auto_start_forecast:
+                engine = get_forecast_engine(sensor_id)
+                engine.start_forecasting()
+                
+                return {
+                    "success": True,
+                    "training_result": result,
+                    "forecast_started": True,
+                    "message": "Model trained and continuous forecasting started"
+                }
+            else:
+                return {
+                    "success": True,
+                    "training_result": result,
+                    "forecast_started": False,
+                    "message": "Model trained successfully"
+                }
+        else:
+            return {"success": False, "training_result": result}
+            
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 # ============================================================
 # MAIN
